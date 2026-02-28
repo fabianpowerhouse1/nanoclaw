@@ -1,0 +1,10 @@
+.env
+.env.*
+*.session
+n8n_data/
+bot/store/
+node_modules/
+*.log
+data/
+logs/
+.claude/
