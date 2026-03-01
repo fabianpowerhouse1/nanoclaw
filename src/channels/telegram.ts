@@ -14,6 +14,7 @@ import {
   OnInboundMessage,
   RegisteredGroup,
 } from '../types.js';
+import { storeMessageDirect, storeChatMetadata } from "../db.js";
 
 export interface TelegramChannelOpts {
   onMessage: OnInboundMessage;
@@ -255,6 +256,21 @@ export class TelegramChannel implements Channel {
         }
       }
       logger.info({ jid, length: text.length }, 'Telegram message sent');
+      
+      const now = new Date().toISOString();
+      // Ensure chat metadata exists to satisfy FK constraint
+      storeChatMetadata(jid, now, undefined, 'telegram', jid.includes(':'));
+
+      storeMessageDirect({
+        id: 'out-' + Date.now(),
+        chat_jid: jid,
+        sender: 'me',
+        sender_name: ASSISTANT_NAME,
+        content: text,
+        timestamp: now,
+        is_from_me: true,
+        is_bot_message: true
+      });
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Telegram message');
     }

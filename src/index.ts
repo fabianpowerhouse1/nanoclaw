@@ -478,6 +478,35 @@ function startInternalBridge(): void {
   const app = express();
   app.use(express.json());
 
+  /**
+   * Deep Health Check Endpoint
+   * Triggers a real agent run to verify Docker, Auth, and Logic.
+   */
+  app.get('/health/deep', async (req: Request, res: Response) => {
+    const mainGroup = Object.values(registeredGroups)[0];
+    if (!mainGroup) {
+      res.status(500).json({ status: 'error', error: 'Main group not registered' });
+      return;
+    }
+
+    const testJid = Object.keys(registeredGroups).find(k => registeredGroups[k].folder === MAIN_GROUP_FOLDER) || 'health-check';
+    
+    logger.info('Deep Health Check triggered');
+    
+    try {
+      // Use a minimal but real prompt to test Gemini connectivity
+      const result = await runAgent(mainGroup, 'pw execute echo "HEALTH_OK"', testJid);
+      
+      if (result === 'success') {
+        res.json({ status: 'ok', message: 'Full-stack health check passed' });
+      } else {
+        res.status(500).json({ status: 'error', error: 'Agent execution failed' });
+      }
+    } catch (err: any) {
+      res.status(500).json({ status: 'error', error: err.message });
+    }
+  });
+
   app.post('/webhook', async (req: Request, res: Response) => {
     const { chatJid, prompt, callbackUrl } = req.body;
     if (!chatJid || !prompt) {
