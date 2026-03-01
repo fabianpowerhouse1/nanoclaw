@@ -4,31 +4,23 @@ Personal Claude assistant. See [README.md](README.md) for philosophy and setup. 
 
 ## Quick Context
 
-Single Node.js process that connects to WhatsApp, routes messages to Claude Agent SDK running in containers (Linux VMs). Each group has isolated filesystem and memory.
+Single Node.js process that connects to WhatsApp/Telegram, routes messages to agents running in containers. Supports **Decoupled Skills** via a standalone `skill-service`.
 
-## Key Files
+## Key Files & Infrastructure
 
-| File | Purpose |
-|------|---------|
-| `src/index.ts` | Orchestrator: state, message loop, agent invocation |
-| `src/channels/whatsapp.ts` | WhatsApp connection, auth, send/receive |
-| `src/ipc.ts` | IPC watcher and task processing |
-| `src/router.ts` | Message formatting and outbound routing |
-| `src/config.ts` | Trigger pattern, paths, intervals |
-| `src/container-runner.ts` | Spawns agent containers with mounts |
-| `src/task-scheduler.ts` | Runs scheduled tasks |
-| `src/db.ts` | SQLite operations |
-| `groups/{name}/CLAUDE.md` | Per-group memory (isolated) |
-| `container/skills/agent-browser.md` | Browser automation tool (available to all agents via Bash) |
+| File/Service | Purpose |
+|--------------|---------|
+| `skill-service` | Standalone tool registry (managed in `orchestrator/infra`). |
+| `src/config.ts` | Handles `SKILL_SERVICE_URL` and `SKILL_SERVICE_PSK`. |
+| `src/container-runner.ts`| Mounts `pw-sync.js` into containers. |
+| `container/skills/n8n-tool/` | Skill definition for n8n sync logic. |
+| `groups/{name}/CLAUDE.md` | Per-group memory (isolated). |
 
-## Skills
+## Decoupled Skill Layer (The "Tool-as-a-Service" Pattern)
 
-| Skill | When to Use |
-|-------|-------------|
-| `/setup` | First-time installation, authentication, service configuration |
-| `/customize` | Adding channels, integrations, changing behavior |
-| `/debug` | Container issues, logs, troubleshooting |
-| `/update` | Pull upstream NanoClaw changes, merge with customizations, run migrations |
+Agents interact with the `skill-service` using the `pw-sync` CLI tool.
+- **n8n Sync**: `pw-sync n8n export/import` manages workflows as JSON.
+- **Security**: Authenticated via internal PSK over `infra_core-net`.
 
 ## Development
 
@@ -40,19 +32,6 @@ npm run build        # Compile TypeScript
 ./container/build.sh # Rebuild agent container
 ```
 
-Service management:
-```bash
-# macOS (launchd)
-launchctl load ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl unload ~/Library/LaunchAgents/com.nanoclaw.plist
-launchctl kickstart -k gui/$(id -u)/com.nanoclaw  # restart
+## Zero Ingress Management
 
-# Linux (systemd)
-systemctl --user start nanoclaw
-systemctl --user stop nanoclaw
-systemctl --user restart nanoclaw
-```
-
-## Container Build Cache
-
-The container buildkit caches the build context aggressively. `--no-cache` alone does NOT invalidate COPY steps — the builder's volume retains stale files. To force a truly clean rebuild, prune the builder then re-run `./container/build.sh`.
+The n8n UI is not exposed. To bootstrap or reset API keys, use host-side `sqlite3` to inject encrypted keys into the `user_api_keys` table. See `docs/adr/0001-decoupled-skill-architecture.md` for the exact procedure.

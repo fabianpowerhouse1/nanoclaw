@@ -23,6 +23,8 @@ const envConfig = readEnvFile([
   'TELEGRAM_GROUP_POLICY',
   'HOST_PROJECT_PATH',
   'PROVIDER',
+  'SKILL_SERVICE_URL',
+  'SKILL_SERVICE_PSK_FILE'
 ]);
 
 /**
@@ -137,3 +139,7 @@ export const TELEGRAM_ONLY =
   telegramOnlyEnv !== undefined
     ? telegramOnlyEnv === 'true'
     : MESSENGER_PLATFORM === 'telegram';
+
+// Decoupled Skill Service configuration
+export const SKILL_SERVICE_URL = process.env.SKILL_SERVICE_URL || envConfig.SKILL_SERVICE_URL;
+export const SKILL_SERVICE_PSK = readSecret('SKILL_SERVICE_PSK', 'SKILL_SERVICE_PSK_FILE');

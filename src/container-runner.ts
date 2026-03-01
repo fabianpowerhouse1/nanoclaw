@@ -17,6 +17,8 @@ import {
   HOST_PROJECT_PATH,
   PROVIDER,
   GEMINI_SESSION_PATH,
+  SKILL_SERVICE_URL,
+  SKILL_SERVICE_PSK,
 } from './config.js';
 import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
@@ -99,7 +101,7 @@ function ensureWritableDir(dirPath: string): void {
       // 1000:1000 is the default 'node' user in official images
       fs.chownSync(dirPath, 1000, 1000);
     } catch (err) {
-      logger.warn({ dirPath, err }, 'Failed to set directory ownership');
+      // Ignore errors (e.g. on filesystems that don't support ownership)
     }
   }
 }
@@ -162,6 +164,17 @@ function buildVolumeMounts(
       hostPath: toHostPath(process.env.SSH_AUTH_SOCK),
       containerPath: '/ssh-agent',
       readonly: false,
+    });
+  }
+
+  // Decoupled Skill Tool: pw-sync
+  // Mounted from orchestrator/infra/skill-service/src/pw-sync.js
+  const pwSyncPath = path.resolve(projectRoot, '..', 'orchestrator', 'infra', 'skill-service', 'src', 'pw-sync.js');
+  if (fs.existsSync(pwSyncPath)) {
+    mounts.push({
+      hostPath: toHostPath(pwSyncPath),
+      containerPath: '/usr/local/bin/pw-sync',
+      readonly: true,
     });
   }
 
@@ -269,10 +282,14 @@ function buildVolumeMounts(
  * Secrets are never written to disk or mounted as files.
  */
 function readSecrets(): Record<string, string> {
-  if (PROVIDER === 'gemini-cli') {
-    return {}; // No secrets needed for gemini-cli as it uses the mounted session
+  const secrets = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  
+  // Inject Skill Service PSK if available
+  if (SKILL_SERVICE_PSK) {
+    secrets.SKILL_SERVICE_PSK = SKILL_SERVICE_PSK;
   }
-  return readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  
+  return secrets;
 }
 
 function buildContainerArgs(
@@ -284,6 +301,14 @@ function buildContainerArgs(
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
+
+  // Skill Service configuration
+  if (SKILL_SERVICE_URL) {
+    args.push('-e', `SKILL_SERVICE_URL=${SKILL_SERVICE_URL}`);
+    // If we are in a docker-compose environment, we likely want to be on the same network
+    // 'core-net' is the default for our orchestrator stack.
+    args.push('--network', 'infra_core-net'); 
+  }
 
   // SSH Agent Forwarding
   if (process.env.SSH_AUTH_SOCK) {
