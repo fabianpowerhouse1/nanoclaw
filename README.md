@@ -32,6 +32,10 @@ claude
 
 Then run `/setup`. Claude Code handles everything: dependencies, authentication, container setup, service configuration.
 
+## Decoupled Skill Architecture
+
+This installation supports **Language-Agnostic Tools** managed by a separate `skill-service`. This ensures that skills remain infrastructure assets, independent of the core bot process. For a detailed guide on our skill strategy and implementation, see [container/skills/README.md](container/skills/README.md).
+
 ## Architecture
 
 ```
