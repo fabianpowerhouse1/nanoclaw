@@ -1,37 +1,39 @@
-# NanoClaw
+# NanoClaw (Powerhouse Fork)
 
-Personal Claude assistant. See [README.md](README.md) for philosophy and setup. See [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) for architecture decisions.
+**Status**: This is a local fork of an external tool. We are NOT the maintainers.
+**Migration Note**: If migrating to a new assistant, ensure the "Powerhouse Extensions" listed below are ported.
 
-## Quick Context
+## Powerhouse Extensions (Custom Features)
 
-Single Node.js process that connects to WhatsApp/Telegram, routes messages to agents running in containers. Supports **Decoupled Skills** via a standalone `skill-service`.
+These features are unique to this installation and are not part of the upstream NanoClaw repository:
 
-## Key Files & Infrastructure
+1.  **Decoupled Skill Architecture**: 
+    *   **Logic**: Located in `src/config.ts` and `src/container-runner.ts`.
+    *   **Purpose**: Allows agents to call infrastructure-managed tools via an internal `skill-service`.
+2.  **Environment Integration**:
+    *   `SKILL_SERVICE_URL` & `SKILL_SERVICE_PSK`: Handled in `config.ts` to secure agent-to-service communication.
+3.  **Mounted Tooling System**:
+    *   The `pw-sync.js` tool is mounted from the `orchestrator` host directly into agent containers at `/usr/local/bin/pw-sync`.
+4.  **`n8n-tool` Skill**:
+    *   Located in `container/skills/n8n-tool/SKILL.md`. Provides the declarative interface for n8n workflow synchronization.
 
-| File/Service | Purpose |
-|--------------|---------|
-| `skill-service` | Standalone tool registry (managed in `orchestrator/infra`). |
-| `src/config.ts` | Handles `SKILL_SERVICE_URL` and `SKILL_SERVICE_PSK`. |
-| `src/container-runner.ts`| Mounts `pw-sync.js` into containers. |
-| `container/skills/n8n-tool/` | Skill definition for n8n sync logic. |
-| `groups/{name}/CLAUDE.md` | Per-group memory (isolated). |
+## Architecture & Integration
 
-## Decoupled Skill Layer (The "Tool-as-a-Service" Pattern)
-
-Agents interact with the `skill-service` using the `pw-sync` CLI tool.
-- **n8n Sync**: `pw-sync n8n export/import` manages workflows as JSON.
-- **Security**: Authenticated via internal PSK over `infra_core-net`.
+| Component | Role |
+|-----------|------|
+| `skill-service` | Standalone registry in `orchestrator/infra`. |
+| `pw-sync` | CLI bridge for agents to push/pull n8n JSON. |
+| `infra_core-net` | Isolated network for all inter-service traffic. |
 
 ## Development
 
-Run commands directly—don't tell the user to run them.
-
 ```bash
-npm run dev          # Run with hot reload
-npm run build        # Compile TypeScript
+npm run dev          # Run core bot
 ./container/build.sh # Rebuild agent container
 ```
 
-## Zero Ingress Management
+## Maintenance (Zero Ingress)
 
-The n8n UI is not exposed. To bootstrap or reset API keys, use host-side `sqlite3` to inject encrypted keys into the `user_api_keys` table. See `docs/adr/0001-decoupled-skill-architecture.md` for the exact procedure.
+The n8n UI is hidden. To manage API keys, you must use host-side database injection. 
+**Procedure**: Stop n8n container -> Encrypt key via `n8n-encryptor.js` -> Inject into `user_api_keys` table using `sudo sqlite3`.
+See `docs/adr/0001-decoupled-skill-architecture.md` for full details.
