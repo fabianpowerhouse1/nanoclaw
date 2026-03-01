@@ -5,17 +5,15 @@
 
 ## Powerhouse Extensions (Custom Features)
 
-These features are unique to this installation and are not part of the upstream NanoClaw repository:
+1.  **Decoupled Skill Architecture**: Located in `src/config.ts` and `src/container-runner.ts`.
+2.  **Mounted Tooling System**: `pw-sync.js` is mounted from host into agent containers.
+3.  **`n8n-tool` Skill**: Located in `container/skills/n8n-tool/SKILL.md`.
 
-1.  **Decoupled Skill Architecture**: 
-    *   **Logic**: Located in `src/config.ts` and `src/container-runner.ts`.
-    *   **Purpose**: Allows agents to call infrastructure-managed tools via an internal `skill-service`.
-2.  **Environment Integration**:
-    *   `SKILL_SERVICE_URL` & `SKILL_SERVICE_PSK`: Handled in `config.ts` to secure agent-to-service communication.
-3.  **Mounted Tooling System**:
-    *   The `pw-sync.js` tool is mounted from the `orchestrator` host directly into agent containers at `/usr/local/bin/pw-sync`.
-4.  **`n8n-tool` Skill**:
-    *   Located in `container/skills/n8n-tool/SKILL.md`. Provides the declarative interface for n8n workflow synchronization.
+## Development Mandates (Powerhouse Standards)
+
+- **Surgical Edits**: NEVER overwrite foundational files (like root `README.md`) when adding feature documentation. Always use targeted injections or create specific guides in subdirectories (e.g., `container/skills/README.md`).
+- **External Tool Awareness**: Maintain a clear boundary between upstream code and Powerhouse extensions to facilitate future migrations.
+- **Zero Ingress Maintenance**: Use host-side `sqlite3` for n8n API key management. See `docs/adr/0001-decoupled-skill-architecture.md`.
 
 ## Architecture & Integration
 
@@ -31,9 +29,3 @@ These features are unique to this installation and are not part of the upstream 
 npm run dev          # Run core bot
 ./container/build.sh # Rebuild agent container
 ```
-
-## Maintenance (Zero Ingress)
-
-The n8n UI is hidden. To manage API keys, you must use host-side database injection. 
-**Procedure**: Stop n8n container -> Encrypt key via `n8n-encryptor.js` -> Inject into `user_api_keys` table using `sudo sqlite3`.
-See `docs/adr/0001-decoupled-skill-architecture.md` for full details.
