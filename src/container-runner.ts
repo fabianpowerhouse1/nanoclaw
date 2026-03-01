@@ -64,6 +64,11 @@ function toHostPath(localPath: string): string {
     return process.env.HOST_SSH_AUTH_SOCK;
   }
 
+  // Special case: Gemini session path
+  if (localPath === "/root/.gemini" || localPath === GEMINI_SESSION_PATH) {
+      return "/home/ubuntu/.gemini";
+  }
+
   if (!HOST_PROJECT_PATH) return localPath;
   
   const projectRoot = process.cwd();
@@ -76,18 +81,6 @@ function toHostPath(localPath: string): string {
     return path.join(HOST_PROJECT_PATH, relative);
   }
   
-  // Special case: Gemini session path
-  // If we're in DooD, we assume the host path is /home/ubuntu/.gemini
-  // or similar. For now, we'll check if it's the GEMINI_SESSION_PATH.
-  if (absoluteLocal === path.resolve(GEMINI_SESSION_PATH)) {
-      // In the user's setup, /home/ubuntu/.gemini is mounted to /root/.gemini
-      // We need to find the host path of /home/ubuntu/.gemini.
-      // Since HOST_PROJECT_PATH is usually /home/ubuntu/.../nanoclaw,
-      // we can try to infer it.
-      const hostHome = HOST_PROJECT_PATH.split('/').slice(0, 3).join('/'); // e.g. /home/ubuntu
-      return path.join(hostHome, '.gemini');
-  }
-
   return localPath;
 }
 
@@ -249,7 +242,7 @@ function buildVolumeMounts(
   }
   mounts.push({
     hostPath: toHostPath(groupAgentRunnerDir),
-    containerPath: '/app/src',
+    containerPath: '/app/src_mount',
     readonly: false,
   });
 
@@ -305,21 +298,6 @@ function buildContainerArgs(
   if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
-  }
-
-  // Pass input as environment variable if provided (requested by user)
-  if (input) {
-    // We exclude secrets from the environment variable for safety.
-    // They are still passed via stdin in runContainerAgent.
-    const inputForEnv = { ...input };
-    delete inputForEnv.secrets;
-    // Ensure provider is set for the agent runner
-    inputForEnv.provider = PROVIDER;
-    const inputStr = JSON.stringify(inputForEnv);
-    // Linux ARG_MAX is usually 128KB+, but we'll stay conservative.
-    if (inputStr.length < 65536) {
-      args.push('-e', `AGENT_INPUT=${inputStr}`);
-    }
   }
 
   for (const mount of mounts) {
@@ -401,6 +379,7 @@ export async function runContainerAgent(
     let parseBuffer = '';
     let newSessionId: string | undefined;
     let outputChain = Promise.resolve();
+    let hadStreamingOutput = false;
 
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
@@ -446,7 +425,7 @@ export async function runContainerAgent(
             outputChain = outputChain.then(() => onOutput(parsed));
           } catch (err) {
             logger.warn(
-              { group: group.name, error: err },
+              { group: group.name, error: err, jsonStr, stdout, stderr },
               'Failed to parse streamed output chunk',
             );
           }
@@ -477,7 +456,6 @@ export async function runContainerAgent(
     });
 
     let timedOut = false;
-    let hadStreamingOutput = false;
     const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
     // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
     // graceful _close sentinel has time to trigger before the hard kill fires.
@@ -553,7 +531,6 @@ export async function runContainerAgent(
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const logFile = path.join(logsDir, `container-${timestamp}.log`);
-      const isVerbose = process.env.LOG_LEVEL === 'debug' || process.env.LOG_LEVEL === 'trace';
 
       const logLines = [
         `=== Container Run Log ===`,
@@ -565,49 +542,29 @@ export async function runContainerAgent(
         `Stdout Truncated: ${stdoutTruncated}`,
         `Stderr Truncated: ${stderrTruncated}`,
         ``,
+        `=== Input ===`,
+        JSON.stringify(input, null, 2),
+        ``,
+        `=== Container Args ===`,
+        containerArgs.join(' '),
+        ``,
+        `=== Mounts ===`,
+        mounts
+          .map(
+            (m) =>
+              `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
+          )
+          .join('\n'),
+        ``,
+        `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
+        stderr,
+        ``,
+        `=== Stdout${stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
+        stdout,
       ];
-
-      const isError = code !== 0;
-
-      if (isVerbose || isError) {
-        logLines.push(
-          `=== Input ===`,
-          JSON.stringify(input, null, 2),
-          ``,
-          `=== Container Args ===`,
-          containerArgs.join(' '),
-          ``,
-          `=== Mounts ===`,
-          mounts
-            .map(
-              (m) =>
-                `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
-            )
-            .join('\n'),
-          ``,
-          `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
-          stderr,
-          ``,
-          `=== Stdout${stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
-          stdout,
-        );
-      } else {
-        logLines.push(
-          `=== Input Summary ===`,
-          `Prompt length: ${input.prompt.length} chars`,
-          `Session ID: ${input.sessionId || 'new'}`,
-          ``,
-          `=== Mounts ===`,
-          mounts
-            .map((m) => `${m.containerPath}${m.readonly ? ' (ro)' : ''}`)
-            .join('\n'),
-          ``,
-        );
-      }
 
       fs.writeFileSync(logFile, logLines.join('\n'));
       if (process.getuid?.() === 0) fs.chownSync(logFile, 1000, 1000);
-      logger.debug({ logFile, verbose: isVerbose }, 'Container log written');
 
       if (code !== 0) {
         logger.error(
@@ -649,8 +606,8 @@ export async function runContainerAgent(
       // Legacy mode: parse the last output marker pair from accumulated stdout
       try {
         // Extract JSON between sentinel markers for robust parsing
-        const startIdx = stdout.indexOf(OUTPUT_START_MARKER);
-        const endIdx = stdout.indexOf(OUTPUT_END_MARKER);
+        const startIdx = stdout.lastIndexOf(OUTPUT_START_MARKER);
+        const endIdx = stdout.lastIndexOf(OUTPUT_END_MARKER);
 
         let jsonLine: string;
         if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
@@ -662,6 +619,8 @@ export async function runContainerAgent(
           const lines = stdout.trim().split('\n');
           jsonLine = lines[lines.length - 1];
         }
+
+        if (!jsonLine) throw new Error("No output markers found and stdout is empty");
 
         const output: ContainerOutput = JSON.parse(jsonLine);
 
@@ -676,7 +635,7 @@ export async function runContainerAgent(
         );
 
         resolve(output);
-      } catch (err) {
+      } catch (err: any) {
         logger.error(
           {
             group: group.name,
@@ -690,7 +649,7 @@ export async function runContainerAgent(
         resolve({
           status: 'error',
           result: null,
-          error: `Failed to parse container output: ${err instanceof Error ? err.message : String(err)}`,
+          error: `Failed to parse container output: ${err.message}`,
         });
       }
     });

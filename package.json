@@ -20,6 +20,7 @@
     "@whiskeysockets/baileys": "^7.0.0-rc.9",
     "better-sqlite3": "^11.8.1",
     "cron-parser": "^5.5.0",
+    "express": "^4.21.0",
     "grammy": "^1.40.0",
     "pino": "^9.6.0",
     "pino-pretty": "^13.0.0",
@@ -30,6 +31,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
+    "@types/express": "^4.17.21",
     "@types/node": "^22.10.0",
     "@types/qrcode-terminal": "^0.12.2",
     "@vitest/coverage-v8": "^4.0.18",

@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import express, { Request, Response } from 'express';
 
 import {
   ASSISTANT_NAME,
@@ -470,6 +471,59 @@ async function startSessionMonitor() {
   setInterval(check, 72 * 60 * 60 * 1000);
 }
 
+/**
+ * Internal Webhook Bridge for n8n
+ */
+function startInternalBridge(): void {
+  const app = express();
+  app.use(express.json());
+
+  app.post('/webhook', async (req: Request, res: Response) => {
+    const { chatJid, prompt, callbackUrl } = req.body;
+    if (!chatJid || !prompt) {
+      res.status(400).json({ error: 'Missing chatJid or prompt' });
+      return;
+    }
+
+    const group = registeredGroups[chatJid];
+    if (!group) {
+      res.status(404).json({ error: `Group not found: ${chatJid}` });
+      return;
+    }
+
+    logger.info({ chatJid, callbackUrl }, 'Internal webhook task received');
+
+    // Asynchronously run the agent
+    (async () => {
+      try {
+        const result = await runAgent(group, prompt, chatJid, async (out) => {
+          if (callbackUrl && out.status !== 'success') {
+             // We can optionally stream incremental results back to n8n here
+          }
+        });
+
+        if (callbackUrl) {
+          logger.info({ chatJid, callbackUrl }, 'Sending task completion callback to n8n');
+          await fetch(callbackUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chatJid, status: result }),
+          });
+        }
+      } catch (err) {
+        logger.error({ chatJid, err }, 'Error in bridge task execution');
+      }
+    })();
+
+    res.json({ status: 'queued', chatJid });
+  });
+
+  const port = 3000;
+  app.listen(port, '0.0.0.0', () => {
+    logger.info(`Internal Webhook Bridge listening on port ${port}`);
+  });
+}
+
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
@@ -508,7 +562,8 @@ async function main(): Promise<void> {
     await telegram.connect();
   }
 
-  // Start subsystems (independently of connection handler)
+  // Start subsystems
+  startInternalBridge();
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
     getSessions: () => sessions,

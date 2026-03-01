@@ -1,4 +1,5 @@
 import path from 'path';
+import fs from 'fs';
 
 import { readEnvFile } from './env.js';
 
@@ -23,6 +24,17 @@ const envConfig = readEnvFile([
   'HOST_PROJECT_PATH',
   'PROVIDER',
 ]);
+
+/**
+ * Helper to read a secret from a file (Docker Secrets) or environment variable.
+ */
+function readSecret(envKey: string, fileKey?: string): string {
+  const filePath = fileKey ? process.env[fileKey] : null;
+  if (filePath && fs.existsSync(filePath)) {
+    return fs.readFileSync(filePath, 'utf-8').trim();
+  }
+  return process.env[envKey] || envConfig[envKey] || '';
+}
 
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -102,8 +114,7 @@ export const MESSENGER_PLATFORM =
   process.env.MESSENGER_PLATFORM || envConfig.MESSENGER_PLATFORM || 'whatsapp';
 
 // Telegram configuration
-export const TELEGRAM_BOT_TOKEN =
-  process.env.TELEGRAM_BOT_TOKEN || envConfig.TELEGRAM_BOT_TOKEN || '';
+export const TELEGRAM_BOT_TOKEN = readSecret('TELEGRAM_BOT_TOKEN', 'TELEGRAM_BOT_TOKEN_FILE');
 
 // Telegram policies
 export const TELEGRAM_ALLOWED_USERS = (
