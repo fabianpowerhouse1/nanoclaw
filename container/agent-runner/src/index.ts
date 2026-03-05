@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
 import * as fs from 'fs';
+import { readFile } from 'fs/promises';
 import * as path from 'path';
 
 // --- TYPES (Matching nanoclaw/src/types.ts and container-runner.ts) ---
@@ -38,6 +39,7 @@ interface ContainerInput {
   provider?: string;
   agentName?: 'claude' | 'gemini'; // Legacy field name
   files?: Array<{ path: string; content: string }>;
+  systemPromptPath?: string;
 }
 
 interface ContainerOutput {
@@ -245,6 +247,19 @@ async function main() {
 
   const provider = input.provider || input.agentName || 'gemini-cli';
   log(`Provider: ${provider}, Chat: ${input.chatJid}`);
+
+  // System Prompt Injection (Fail-Open)
+  const systemPromptPath = input.systemPromptPath || process.env.DEFAULT_SYSTEM_PROMPT_PATH;
+  if (systemPromptPath) {
+    try {
+      log(`Injecting system prompt from: ${systemPromptPath}`);
+      const systemPrompt = await readFile(systemPromptPath, 'utf8');
+      input.prompt = `${systemPrompt}\n\n--- SYSTEM INSTRUCTIONS ---\n\n${input.prompt}`;
+    } catch (err: any) {
+      log(`Warning: Failed to read system prompt at ${systemPromptPath}: ${err.message}`);
+      // Proceed with raw prompt (fail-open)
+    }
+  }
 
   // Create workspace files if provided
   if (input.files && input.files.length > 0) {
