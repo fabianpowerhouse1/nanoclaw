@@ -254,6 +254,7 @@ async function main() {
     try {
       log(`Injecting system prompt from: ${systemPromptPath}`);
       const systemPrompt = await readFile(systemPromptPath, 'utf8');
+      log(`=== INJECTED SYSTEM PROMPT ===\n${systemPrompt}`);
       input.prompt = `${systemPrompt}\n\n--- SYSTEM INSTRUCTIONS ---\n\n${input.prompt}`;
     } catch (err: any) {
       log(`Warning: Failed to read system prompt at ${systemPromptPath}: ${err.message}`);

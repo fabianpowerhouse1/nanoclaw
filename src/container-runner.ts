@@ -111,52 +111,42 @@ function buildVolumeMounts(
   isMain: boolean,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
-  const projectRoot = process.cwd();
-  const groupDir = resolveGroupFolderPath(group.folder);
+  
+  // DECLARATIVE SECURITY: STRICT WORKSPACE ISOLATION
+  // We use the group folder name to isolate each chat/group
+  // Assumption: Host directory /home/ubuntu/powerhouse/workspaces exists.
+  const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}`;
+  mounts.push({
+    hostPath: hostWorkspace,
+    containerPath: '/workspace/group',
+    readonly: false,
+  });
 
-  if (isMain) {
-    // Main gets the project root read-only.
-    mounts.push({
-      hostPath: toHostPath(projectRoot),
-      containerPath: '/workspace/project',
-      readonly: true,
-    });
+  // ACTIVE SESSIONS (Read-Only)
+  // Needed for persona injection by the agent-runner
+  mounts.push({
+    hostPath: '/home/ubuntu/powerhouse/data/active_sessions',
+    containerPath: '/workspace/active_sessions',
+    readonly: true,
+  });
 
-    // Main also gets its group folder as the working directory
-    ensureWritableDir(groupDir);
-    mounts.push({
-      hostPath: toHostPath(groupDir),
-      containerPath: '/workspace/group',
-      readonly: false,
-    });
-  } else {
-    // Other groups only get their own folder
-    ensureWritableDir(groupDir);
-    mounts.push({
-      hostPath: toHostPath(groupDir),
-      containerPath: '/workspace/group',
-      readonly: false,
-    });
-
-    // Global memory directory (read-only for non-main)
-    const globalDir = path.join(GROUPS_DIR, 'global');
-    if (fs.existsSync(globalDir)) {
-      mounts.push({
-        hostPath: toHostPath(globalDir),
-        containerPath: '/workspace/global',
-        readonly: true,
-      });
-    }
-  }
-
-  // Gemini CLI Session Mount
+  // Gemini CLI Session Mount (Safe, maps to user home)
   if (PROVIDER === 'gemini-cli' && fs.existsSync(GEMINI_SESSION_PATH)) {
     mounts.push({
-      hostPath: toHostPath(GEMINI_SESSION_PATH),
+      hostPath: "/home/ubuntu/.gemini",
       containerPath: '/root/.gemini',
       readonly: false,
     });
   }
+
+  // IPC Mount (Needed for task sync, etc.)
+  // Note: We use toHostPath because the bot needs to write to this too.
+  const groupIpcDir = resolveGroupIpcPath(group.folder);
+  mounts.push({
+    hostPath: toHostPath(groupIpcDir),
+    containerPath: '/workspace/ipc',
+    readonly: false,
+  });
 
   // SSH Agent Forwarding
   if (process.env.SSH_AUTH_SOCK) {
@@ -167,97 +157,8 @@ function buildVolumeMounts(
     });
   }
 
-  // Decoupled Skill Tool: pw-sync
-  // Mounted from orchestrator/infra/skill-service/src/pw-sync.js
-  const pwSyncPath = path.resolve(projectRoot, '..', 'orchestrator', 'infra', 'skill-service', 'src', 'pw-sync.js');
-  if (fs.existsSync(pwSyncPath)) {
-    mounts.push({
-      hostPath: toHostPath(pwSyncPath),
-      containerPath: '/usr/local/bin/pw-sync',
-      readonly: true,
-    });
-  }
-
-  // Per-group Claude sessions directory
-  const groupSessionsDir = path.join(
-    DATA_DIR,
-    'sessions',
-    group.folder,
-    '.claude',
-  );
-  ensureWritableDir(groupSessionsDir);
-  
-  const settingsFile = path.join(groupSessionsDir, 'settings.json');
-  if (!fs.existsSync(settingsFile)) {
-    fs.writeFileSync(settingsFile, JSON.stringify({
-      env: {
-        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: '1',
-        CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
-        CLAUDE_CODE_DISABLE_AUTO_MEMORY: '0',
-      },
-    }, null, 2) + '\n');
-    if (process.getuid?.() === 0) fs.chownSync(settingsFile, 1000, 1000);
-  }
-
-  // Sync skills
-  const skillsSrc = path.join(process.cwd(), 'container', 'skills');
-  const skillsDst = path.join(groupSessionsDir, 'skills');
-  if (fs.existsSync(skillsSrc)) {
-    ensureWritableDir(skillsDst);
-    for (const skillDir of fs.readdirSync(skillsSrc)) {
-      const srcDir = path.join(skillsSrc, skillDir);
-      if (!fs.statSync(srcDir).isDirectory()) continue;
-      const dstDir = path.join(skillsDst, skillDir);
-      if (!fs.existsSync(dstDir)) {
-        fs.cpSync(srcDir, dstDir, { recursive: true });
-        if (process.getuid?.() === 0) {
-           // Recursively chown copied skills
-           const chownRecursive = (p: string) => {
-             fs.chownSync(p, 1000, 1000);
-             if (fs.statSync(p).isDirectory()) {
-               for (const f of fs.readdirSync(p)) chownRecursive(path.join(p, f));
-             }
-           };
-           chownRecursive(dstDir);
-        }
-      }
-    }
-  }
-  mounts.push({
-    hostPath: toHostPath(groupSessionsDir),
-    containerPath: '/home/node/.claude',
-    readonly: false,
-  });
-
-  // Per-group IPC namespace
-  const groupIpcDir = resolveGroupIpcPath(group.folder);
-  ensureWritableDir(path.join(groupIpcDir, 'messages'));
-  ensureWritableDir(path.join(groupIpcDir, 'tasks'));
-  ensureWritableDir(path.join(groupIpcDir, 'input'));
-  mounts.push({
-    hostPath: toHostPath(groupIpcDir),
-    containerPath: '/workspace/ipc',
-    readonly: false,
-  });
-
-  // Sync agent-runner source (ALWAYS sync to ensure latest runner is used)
-  const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
-  const groupAgentRunnerDir = path.join(DATA_DIR, 'sessions', group.folder, 'agent-runner-src');
-  if (fs.existsSync(agentRunnerSrc)) {
-    ensureWritableDir(groupAgentRunnerDir);
-    fs.cpSync(agentRunnerSrc, groupAgentRunnerDir, { recursive: true });
-    if (process.getuid?.() === 0) {
-      for (const f of fs.readdirSync(groupAgentRunnerDir)) {
-        fs.chownSync(path.join(groupAgentRunnerDir, f), 1000, 1000);
-      }
-      fs.chownSync(groupAgentRunnerDir, 1000, 1000);
-    }
-  }
-  mounts.push({
-    hostPath: toHostPath(groupAgentRunnerDir),
-    containerPath: '/app/src_mount',
-    readonly: false,
-  });
+  // NOTE: Mounts exposing orchestrator source or bot root have been removed 
+  // to prevent container escape/overwrite (Objective 2).
 
   // Additional mounts
   if (group.containerConfig?.additionalMounts) {
@@ -298,6 +199,11 @@ function buildContainerArgs(
   input?: ContainerInput,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+
+  // TELEMETRY & HARDENING INJECTION (Objective 1)
+  args.push('-e', 'CI=true');
+  args.push('-e', 'NONINTERACTIVE=1');
+  args.push('-e', 'DEFAULT_SYSTEM_PROMPT_PATH=/workspace/active_sessions/pilot-alpha_pm_prompt.txt');
 
   // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
