@@ -133,19 +133,14 @@ function buildVolumeMounts(
 
   if (PROVIDER === 'gemini-cli') {
     if (input.isIsolated) {
-        // MENTAL ISOLATION BOOTSTRAP: MOUNT AUTHENTICATION INDIVIDUALLY (READ-ONLY)
-        const authFiles = ['settings.json', 'google_accounts.json', 'oauth_creds.json', 'state.json', 'installation_id'];
-        for (const file of authFiles) {
-            const containerSrc = path.join(GEMINI_SESSION_PATH, file);
-            if (fs.existsSync(containerSrc) && !fs.statSync(containerSrc).isDirectory()) {
-                const hostSrc = `/home/ubuntu/.gemini/${file}`;
-                mounts.push({
-                    hostPath: hostSrc,
-                    containerPath: `/root/.gemini/${file}`,
-                    readonly: true
-                });
-            }
-        }
+        // MENTAL ISOLATION BOOTSTRAP: MOUNT ENTIRE .gemini READ-ONLY
+        mounts.push({
+            hostPath: "/home/ubuntu/.gemini",
+            containerPath: '/root/.gemini',
+            readonly: true
+        });
+
+        // OVERLAY EPHEMERAL HISTORY (Allow writing to history without affecting host)
         const sterileHistoryPath = `/tmp/sterile-history-${Date.now()}`;
         fs.mkdirSync(sterileHistoryPath, { recursive: true });
         fs.chmodSync(sterileHistoryPath, 0o777);
@@ -194,7 +189,7 @@ function buildContainerArgs(
   containerName: string,
   input?: ContainerInput,
 ): string[] {
-  const args: string[] = ['run', '-i', '--rm', '--name', containerName];
+  const args: string[] = ['run', '-i', '--name', containerName];
   args.push('-e', 'CI=true');
   args.push('-e', 'NONINTERACTIVE=1');
   
@@ -227,8 +222,8 @@ function buildContainerArgs(
   const hostGid = process.getgid?.();
   if (input?.isIsolated) {
       args.push("--workdir", "/workspace");
-      // Walled Garden needs root for /root/.gemini access
-      args.push('--user', '0:0');
+      args.push('--user', '1000:1000');
+      args.push('-e', 'HOME=/tmp');
   } else if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');

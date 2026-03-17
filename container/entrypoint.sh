@@ -10,4 +10,4 @@ mkdir -p /tmp/dist
 ln -sf /app/node_modules /tmp/dist/node_modules
 # Execute the agent
 cat > /tmp/input.json
-HOME=/root node /tmp/dist/index.js < /tmp/input.json
+node /tmp/dist/index.js < /tmp/input.json
