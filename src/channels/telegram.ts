@@ -37,6 +37,7 @@ export class TelegramChannel implements Channel {
 
   async connect(): Promise<void> {
     this.bot = new Bot(this.botToken);
+    logger.info("Telegram bot initialized, starting polling...");
 
     // Command to get chat ID (useful for registration)
     this.bot.command('chatid', (ctx) => {
@@ -59,8 +60,9 @@ export class TelegramChannel implements Channel {
     });
 
     this.bot.on('message:text', async (ctx) => {
-      // Skip commands
-      if (ctx.message.text.startsWith('/')) return;
+      // Skip commands (except our experimental isolation command)
+      const isIsolationCommand = ctx.message.text.startsWith('/v6_isolate');
+      if (ctx.message.text.startsWith('/') && !isIsolationCommand) return;
 
       const senderId = ctx.from?.id.toString() || '';
       
@@ -72,6 +74,18 @@ export class TelegramChannel implements Channel {
 
       const chatJid = `tg:${ctx.chat.id}`;
       let content = ctx.message.text;
+      
+      // EXPERIMENTAL SHADOW ROUTE: Extract Project Isolation Metadata
+      if (isIsolationCommand) {
+        const parts = content.split(' ');
+        if (parts.length >= 2) {
+          const project = parts[1];
+          const remaining = parts.slice(2).join(' ').trim();
+          content = `[V6_ISOLATE:${project}] ${remaining || 'Initiate isolated session.'}`;
+          logger.info({ chatJid, project }, 'Telegram experimental isolation command detected');
+        }
+      }
+
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
         ctx.from?.first_name ||
@@ -88,8 +102,6 @@ export class TelegramChannel implements Channel {
           : (ctx.chat as any).title || chatJid;
 
       // Translate Telegram @bot_username mentions into TRIGGER_PATTERN format.
-      // Telegram @mentions (e.g., @andy_ai_bot) won't match TRIGGER_PATTERN
-      // (e.g., ^@Andy\b), so we prepend the trigger when the bot is @mentioned.
       const botUsername = ctx.me?.username?.toLowerCase();
       if (botUsername) {
         const entities = ctx.message.entities || [];
@@ -163,7 +175,7 @@ export class TelegramChannel implements Channel {
       );
     });
 
-    // Handle non-text messages with placeholders so the agent knows something was sent
+    // Handle non-text messages with placeholders
     const storeNonText = (ctx: any, placeholder: string) => {
       const senderId = ctx.from?.id.toString() || '';
       if (TELEGRAM_ALLOWED_USERS.length > 0 && !TELEGRAM_ALLOWED_USERS.includes(senderId)) {
@@ -216,18 +228,12 @@ export class TelegramChannel implements Channel {
       logger.error({ err: err.message }, 'Telegram bot error');
     });
 
-    // Start polling — returns a Promise that resolves when started
+    // Start polling
     return new Promise<void>((resolve) => {
-      this.bot!.start({
+            this.bot!.start({
         onStart: (botInfo) => {
-          logger.info(
-            { username: botInfo.username, id: botInfo.id },
-            'Telegram bot connected',
-          );
-          console.log(`\n  Telegram bot: @${botInfo.username}`);
-          console.log(
-            `  Send /chatid to the bot to get a chat's registration ID\n`,
-          );
+          logger.info({ username: botInfo.username, id: botInfo.id }, "Telegram bot connected");
+          console.log("Telegram bot connected: @" + botInfo.username);
           resolve();
         },
       });
@@ -243,7 +249,7 @@ export class TelegramChannel implements Channel {
     try {
       const numericId = jid.replace(/^tg:/, '');
 
-      // Telegram has a 4096 character limit per message — split if needed
+      // Telegram has a 4096 character limit per message
       const MAX_LENGTH = 4096;
       if (text.length <= MAX_LENGTH) {
         await this.bot.api.sendMessage(numericId, text);
@@ -258,7 +264,6 @@ export class TelegramChannel implements Channel {
       logger.info({ jid, length: text.length }, 'Telegram message sent');
       
       const now = new Date().toISOString();
-      // Ensure chat metadata exists to satisfy FK constraint
       storeChatMetadata(jid, now, undefined, 'telegram', jid.includes(':'));
 
       storeMessageDirect({

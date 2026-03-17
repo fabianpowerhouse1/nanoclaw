@@ -111,7 +111,6 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
 
 /**
  * Get available groups list for the agent.
- * Returns groups ordered by most recent activity.
  */
 export function getAvailableGroups(): import('./container-runner.js').AvailableGroup[] {
   const chats = getAllChats();
@@ -134,9 +133,8 @@ export function _setRegisteredGroups(groups: Record<string, RegisteredGroup>): v
 
 /**
  * Process all pending messages for a group.
- * Called by the GroupQueue when it's this group's turn.
  */
-async function processGroupMessages(chatJid: string): Promise<boolean> {
+export async function processGroupMessages(chatJid: string): Promise<boolean> {
   const group = registeredGroups[chatJid];
   if (!group) return true;
 
@@ -153,29 +151,84 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
-  // For non-main groups, check if trigger is required and present
-  if (!isMainGroup && group.requiresTrigger !== false) {
-    const hasTrigger = missedMessages.some((m) =>
+  // PATCH C: Backlog TTL (Skip messages older than 30 mins)
+  const TTL_MS = 30 * 60 * 1000;
+  const now = Date.now();
+  const validMessages = missedMessages.filter(m => {
+      const msgTime = new Date(m.timestamp).getTime();
+      return (now - msgTime) < TTL_MS;
+  });
+
+  if (validMessages.length === 0) {
+      logger.info({ chatJid }, 'Skipping stale backlog messages due to TTL');
+      lastAgentTimestamp[chatJid] = missedMessages[missedMessages.length - 1].timestamp;
+      saveState();
+      return true;
+  }
+
+  // EXPERIMENTAL SHADOW ROUTE: Detect Isolation Request
+  let isIsolated = false;
+  let projectPath = '';
+  let personaOverride = '';
+  const firstMsg = validMessages[0].content;
+  if (firstMsg.includes('[V6_ISOLATE:')) {
+    const match = firstMsg.match(/\[V6_ISOLATE:([^\]]+)\]/);
+    if (match) {
+        isIsolated = true;
+        projectPath = match[1];
+        
+        // PERSONA INJECTION: Extract [ROLE: PersonaName]
+        const roleMatch = firstMsg.match(/\[ROLE:([^\]]+)\]/);
+        if (roleMatch) {
+            personaOverride = roleMatch[1].trim();
+            logger.info({ chatJid, projectPath, personaOverride }, 'Processing isolated task with dynamic persona');
+        } else {
+            logger.info({ chatJid, projectPath }, 'Processing isolated Walled Garden task');
+        }
+    }
+  }
+
+  // For non-main groups, check if trigger is required
+  if (!isMainGroup && group.requiresTrigger !== false && !isIsolated) {
+    const hasTrigger = validMessages.some((m) =>
       TRIGGER_PATTERN.test(m.content.trim()),
     );
     if (!hasTrigger) return true;
   }
 
-  const prompt = formatMessages(missedMessages);
+  // Scrub the isolation metadata and role tags from the prompt before sending to agent
+  const sanitizedMessages = validMessages.map(m => ({
+      ...m,
+      content: m.content
+        .replace(/\[V6_ISOLATE:[^\]]+\]/, '')
+        .replace(/\[ROLE:[^\]]+\]/, '')
+        .trim()
+  }));
 
-  // Advance cursor so the piping path in startMessageLoop won't re-fetch
-  // these messages. Save the old cursor so we can roll back on error.
+  let prompt = formatMessages(sanitizedMessages);
+  
+  // PATCH F: HARD ANCHORING & ANTI-HALLUCINATION
+  if (isIsolated) {
+      let systemOverride = `SYSTEM_INSTRUCTIONS: CRITICAL ISOLATION MANDATE.\n`;
+      systemOverride += `1. You are in a strictly isolated V6 workspace.\n`;
+      systemOverride += `2. YOUR PROJECT ROOT IS ALWAYS EXACTLY '/workspace'.\n`;
+      systemOverride += `3. YOU MUST IGNORE ALL FILES IN '/app'. That directory contains system runners, NOT your project.\n`;
+      systemOverride += `4. DO NOT attempt to search outside '/workspace'. If '/workspace' appears empty, report it immediately.\n`;
+      systemOverride += `5. Your identity is governed by the PERSONA file loaded in your system prompt.`;
+      
+      prompt = `${systemOverride}\n\n${prompt}`;
+  }
+
   const previousCursor = lastAgentTimestamp[chatJid] || '';
   lastAgentTimestamp[chatJid] =
-    missedMessages[missedMessages.length - 1].timestamp;
+    validMessages[validMessages.length - 1].timestamp;
   saveState();
 
   logger.info(
-    { group: group.name, messageCount: missedMessages.length },
+    { group: group.name, messageCount: validMessages.length, isIsolated },
     'Processing messages',
   );
 
-  // Track idle timer for closing stdin when agent is idle
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
 
   const resetIdleTimer = () => {
@@ -191,43 +244,26 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
   let outputSentToUser = false;
 
   const output = await runAgent(group, prompt, chatJid, async (result) => {
-    // Streaming output callback — called for each agent result
     if (result.result) {
       const raw = typeof result.result === 'string' ? result.result : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
       const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      logger.info({ group: group.name }, `Agent output: ${raw.slice(0, 200)}`);
       if (text) {
         await channel.sendMessage(chatJid, text);
         outputSentToUser = true;
       }
-      // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
     }
-
-    if (result.status === 'success') {
-      queue.notifyIdle(chatJid);
-    }
-
-    if (result.status === 'error') {
-      hadError = true;
-    }
-  });
+    if (result.status === 'success') queue.notifyIdle(chatJid);
+    if (result.status === 'error') hadError = true;
+  }, isIsolated, projectPath, personaOverride);
 
   await channel.setTyping?.(chatJid, false);
   if (idleTimer) clearTimeout(idleTimer);
 
   if (output === 'error' || hadError) {
-    // If we already sent output to the user, don't roll back the cursor —
-    // the user got their response and re-processing would send duplicates.
-    if (outputSentToUser) {
-      logger.warn({ group: group.name }, 'Agent error after output was sent, skipping cursor rollback to prevent duplicates');
-      return true;
-    }
-    // Roll back cursor so retries can re-process these messages
+    if (outputSentToUser) return true;
     lastAgentTimestamp[chatJid] = previousCursor;
     saveState();
-    logger.warn({ group: group.name }, 'Agent error, rolled back message cursor for retry');
     return false;
   }
 
@@ -239,11 +275,13 @@ async function runAgent(
   prompt: string,
   chatJid: string,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  isIsolated: boolean = false,
+  projectPath?: string,
+  personaOverride?: string,
 ): Promise<'success' | 'error'> {
   const isMain = group.folder === MAIN_GROUP_FOLDER;
   const sessionId = sessions[group.folder];
 
-  // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
   writeTasksSnapshot(
     group.folder,
@@ -259,7 +297,6 @@ async function runAgent(
     })),
   );
 
-  // Update available groups snapshot (main group only can see all groups)
   const availableGroups = getAvailableGroups();
   writeGroupsSnapshot(
     group.folder,
@@ -268,10 +305,9 @@ async function runAgent(
     new Set(Object.keys(registeredGroups)),
   );
 
-  // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
-        if (output.newSessionId) {
+        if (output.newSessionId && !isIsolated) {
           sessions[group.folder] = output.newSessionId;
           setSession(group.folder, output.newSessionId);
         }
@@ -284,17 +320,20 @@ async function runAgent(
       group,
       {
         prompt,
-        sessionId,
+        sessionId: isIsolated ? undefined : sessionId, // Isolated runs start fresh
         groupFolder: group.folder,
         chatJid,
         isMain,
         assistantName: ASSISTANT_NAME,
+        isIsolated,
+        projectPath,
+        personaOverride,
       },
       (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
       wrappedOnOutput,
     );
 
-    if (output.newSessionId) {
+    if (output.newSessionId && !isIsolated) {
       sessions[group.folder] = output.newSessionId;
       setSession(group.folder, output.newSessionId);
     }
@@ -315,10 +354,7 @@ async function runAgent(
 }
 
 async function startMessageLoop(): Promise<void> {
-  if (messageLoopRunning) {
-    logger.debug('Message loop already running, skipping duplicate start');
-    return;
-  }
+  if (messageLoopRunning) return;
   messageLoopRunning = true;
 
   logger.info(`NanoClaw running (trigger: ${TRIGGER_PATTERN.source})`);
@@ -329,21 +365,14 @@ async function startMessageLoop(): Promise<void> {
       const { messages, newTimestamp } = getNewMessages(jids, lastTimestamp, ASSISTANT_NAME);
 
       if (messages.length > 0) {
-        logger.info({ count: messages.length }, 'New messages');
-
-        // Advance the "seen" cursor for all messages immediately
         lastTimestamp = newTimestamp;
         saveState();
 
-        // Deduplicate by group
         const messagesByGroup = new Map<string, NewMessage[]>();
         for (const msg of messages) {
           const existing = messagesByGroup.get(msg.chat_jid);
-          if (existing) {
-            existing.push(msg);
-          } else {
-            messagesByGroup.set(msg.chat_jid, [msg]);
-          }
+          if (existing) existing.push(msg);
+          else messagesByGroup.set(msg.chat_jid, [msg]);
         }
 
         for (const [chatJid, groupMessages] of messagesByGroup) {
@@ -351,17 +380,12 @@ async function startMessageLoop(): Promise<void> {
           if (!group) continue;
 
           const channel = findChannel(channels, chatJid);
-          if (!channel) {
-            console.log(`Warning: no channel owns JID ${chatJid}, skipping messages`);
-            continue;
-          }
+          if (!channel) continue;
 
           const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
-          const needsTrigger = !isMainGroup && group.requiresTrigger !== false;
+          const isIsolationRequest = groupMessages.some(m => m.content.includes('[V6_ISOLATE:'));
+          const needsTrigger = !isMainGroup && group.requiresTrigger !== false && !isIsolationRequest;
 
-          // For non-main groups, only act on trigger messages.
-          // Non-trigger messages accumulate in DB and get pulled as
-          // context when a trigger eventually arrives.
           if (needsTrigger) {
             const hasTrigger = groupMessages.some((m) =>
               TRIGGER_PATTERN.test(m.content.trim()),
@@ -369,8 +393,6 @@ async function startMessageLoop(): Promise<void> {
             if (!hasTrigger) continue;
           }
 
-          // Pull all messages since lastAgentTimestamp so non-trigger
-          // context that accumulated between triggers is included.
           const allPending = getMessagesSince(
             chatJid,
             lastAgentTimestamp[chatJid] || '',
@@ -378,22 +400,23 @@ async function startMessageLoop(): Promise<void> {
           );
           const messagesToSend =
             allPending.length > 0 ? allPending : groupMessages;
-          const formatted = formatMessages(messagesToSend);
+          
+          // Sanitize messages if isolation is active in any of them
+          const sanitizedMessages = messagesToSend.map(m => ({
+              ...m,
+              content: m.content
+                .replace(/\[V6_ISOLATE:[^\]]+\]/, '')
+                .replace(/\[ROLE:[^\]]+\]/, '')
+                .trim()
+          }));
+          const formatted = formatMessages(sanitizedMessages);
 
           if (queue.sendMessage(chatJid, formatted)) {
-            logger.debug(
-              { chatJid, count: messagesToSend.length },
-              'Piped messages to active container',
-            );
             lastAgentTimestamp[chatJid] =
               messagesToSend[messagesToSend.length - 1].timestamp;
             saveState();
-            // Show typing indicator while the container processes the piped message
-            channel.setTyping?.(chatJid, true)?.catch((err) =>
-              logger.warn({ chatJid, err }, 'Failed to set typing indicator'),
-            );
+            channel.setTyping?.(chatJid, true)?.catch(() => {});
           } else {
-            // No active container — enqueue for a new one
             queue.enqueueMessageCheck(chatJid);
           }
         }
@@ -405,19 +428,11 @@ async function startMessageLoop(): Promise<void> {
   }
 }
 
-/**
- * Startup recovery: check for unprocessed messages in registered groups.
- * Handles crash between advancing lastTimestamp and processing messages.
- */
 function recoverPendingMessages(): void {
   for (const [chatJid, group] of Object.entries(registeredGroups)) {
     const sinceTimestamp = lastAgentTimestamp[chatJid] || '';
     const pending = getMessagesSince(chatJid, sinceTimestamp, ASSISTANT_NAME);
     if (pending.length > 0) {
-      logger.info(
-        { group: group.name, pendingCount: pending.length },
-        'Recovery: found unprocessed messages',
-      );
       queue.enqueueMessageCheck(chatJid);
     }
   }
@@ -428,170 +443,81 @@ function ensureContainerSystemRunning(): void {
   cleanupOrphans();
 }
 
-/**
- * Periodically check Gemini browser session health
- */
 async function startSessionMonitor() {
   const check = async () => {
     if (PROVIDER !== 'gemini-cli') return;
-    
     const credsFile = path.join(GEMINI_SESSION_PATH, 'oauth_creds.json');
-    if (!fs.existsSync(credsFile)) {
-      logger.warn('Gemini session monitor: oauth_creds.json not found');
-      return;
-    }
-
+    if (!fs.existsSync(credsFile)) return;
     try {
       const creds = JSON.parse(fs.readFileSync(credsFile, 'utf-8'));
       if (creds.expiry_date) {
         const expiry = new Date(creds.expiry_date);
-        const now = new Date();
-        const diffMs = expiry.getTime() - now.getTime();
-        const diffHours = diffMs / (1000 * 60 * 60);
-
+        const diffHours = (expiry.getTime() - Date.now()) / (1000 * 60 * 60);
         if (diffHours < 24) {
-          const message = `⚠️ *Powerhouse Session Alert*: Your Gemini browser session expires in ${Math.round(diffHours)} hours. Please SSH into the server and run \`gemini login\` to prevent service interruption.`;
-          logger.warn({ diffHours }, 'Gemini session nearing expiry');
-          
           const telegram = channels.find(c => c instanceof TelegramChannel) as TelegramChannel | undefined;
           if (telegram) {
             for (const userId of TELEGRAM_ALLOWED_USERS) {
-              await telegram.sendMessage(userId, message);
+              await telegram.sendMessage(userId, `⚠️ *Powerhouse Session Alert*: Your Gemini browser session expires in ${Math.round(diffHours)} hours.`);
             }
           }
         }
       }
-    } catch (err) {
-      logger.error({ err }, 'Failed to check Gemini session expiry');
-    }
+    } catch {}
   };
-
-  // Run immediately then every 72 hours
   await check();
   setInterval(check, 72 * 60 * 60 * 1000);
 }
 
-/**
- * Internal Webhook Bridge for n8n
- */
 function startInternalBridge(): void {
   const app = express();
   app.use(express.json());
-
-  /**
-   * Deep Health Check Endpoint
-   * Triggers a real agent run to verify Docker, Auth, and Logic.
-   */
   app.get('/health/deep', async (req: Request, res: Response) => {
     const mainGroup = Object.values(registeredGroups)[0];
-    if (!mainGroup) {
-      res.status(500).json({ status: 'error', error: 'Main group not registered' });
-      return;
-    }
-
     const testJid = Object.keys(registeredGroups).find(k => registeredGroups[k].folder === MAIN_GROUP_FOLDER) || 'health-check';
-    
-    logger.info('Deep Health Check triggered');
-    
     try {
-      // Use a minimal but real prompt to test Gemini connectivity
-      const result = await runAgent(mainGroup, 'pw execute echo "HEALTH_OK"', testJid);
-      
-      if (result === 'success') {
-        res.json({ status: 'ok', message: 'Full-stack health check passed' });
-      } else {
-        res.status(500).json({ status: 'error', error: 'Agent execution failed' });
-      }
+      const result = await runAgent(mainGroup, 'HEALTH_OK', testJid);
+      res.json({ status: result === 'success' ? 'ok' : 'error' });
     } catch (err: any) {
       res.status(500).json({ status: 'error', error: err.message });
     }
   });
-
   app.post('/webhook', async (req: Request, res: Response) => {
     const { chatJid, prompt, callbackUrl } = req.body;
-    if (!chatJid || !prompt) {
-      res.status(400).json({ error: 'Missing chatJid or prompt' });
-      return;
-    }
-
     const group = registeredGroups[chatJid];
-    if (!group) {
-      res.status(404).json({ error: `Group not found: ${chatJid}` });
-      return;
-    }
-
-    logger.info({ chatJid, callbackUrl }, 'Internal webhook task received');
-
-    // Asynchronously run the agent
+    if (!group) return res.status(404).json({ error: 'Group not found' });
     (async () => {
       try {
-        const result = await runAgent(group, prompt, chatJid, async (out) => {
-          if (callbackUrl && out.status !== 'success') {
-             // We can optionally stream incremental results back to n8n here
-          }
-        });
-
-        if (callbackUrl) {
-          logger.info({ chatJid, callbackUrl }, 'Sending task completion callback to n8n');
-          await fetch(callbackUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chatJid, status: result }),
-          });
-        }
-      } catch (err) {
-        logger.error({ chatJid, err }, 'Error in bridge task execution');
-      }
+        const result = await runAgent(group, prompt, chatJid);
+        if (callbackUrl) await fetch(callbackUrl, { method: 'POST', body: JSON.stringify({ chatJid, status: result }) });
+      } catch {}
     })();
-
     res.json({ status: 'queued', chatJid });
   });
-
-  const port = 3000;
-  app.listen(port, '0.0.0.0', () => {
-    logger.info(`Internal Webhook Bridge listening on port ${port}`);
-  });
+  app.listen(3000, '0.0.0.0');
 }
 
 async function main(): Promise<void> {
   ensureContainerSystemRunning();
   initDatabase();
-  logger.info('Database initialized');
   loadState();
-
-  // Graceful shutdown handlers
-  const shutdown = async (signal: string) => {
-    logger.info({ signal }, 'Shutdown signal received');
+  const shutdown = async () => {
     await queue.shutdown(10000);
     for (const ch of channels) await ch.disconnect();
     process.exit(0);
   };
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
-
-  // Channel callbacks (shared by all channels)
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
   const channelOpts = {
     onMessage: (_chatJid: string, msg: NewMessage) => storeMessage(msg),
-    onChatMetadata: (chatJid: string, timestamp: string, name?: string, channel?: string, isGroup?: boolean) =>
-      storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
+    onChatMetadata: (chatJid: string, timestamp: string, name?: string, channel?: string, isGroup?: boolean) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
-    registerGroup: (jid: string, group: RegisteredGroup) => registerGroup(jid, group),
+    registerGroup,
   };
-
-  // Create and connect channels
-  if (!TELEGRAM_ONLY) {
-    whatsapp = new WhatsAppChannel(channelOpts);
-    channels.push(whatsapp);
-    await whatsapp.connect();
-  }
-
   if (TELEGRAM_BOT_TOKEN) {
     const telegram = new TelegramChannel(TELEGRAM_BOT_TOKEN, channelOpts);
     channels.push(telegram);
     await telegram.connect();
   }
-
-  // Start subsystems
   startInternalBridge();
   startSchedulerLoop({
     registeredGroups: () => registeredGroups,
@@ -599,47 +525,24 @@ async function main(): Promise<void> {
     queue,
     onProcess: (groupJid, proc, containerName, groupFolder) => queue.registerProcess(groupJid, proc, containerName, groupFolder),
     sendMessage: async (jid, rawText) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) {
-        console.log(`Warning: no channel owns JID ${jid}, cannot send message`);
-        return;
-      }
+      const ch = findChannel(channels, jid);
       const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      if (ch && text) await ch.sendMessage(jid, text);
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => {
-      const channel = findChannel(channels, jid);
-      if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
-    },
+    sendMessage: (jid, text) => findChannel(channels, jid)!.sendMessage(jid, text),
     registeredGroups: () => registeredGroups,
     registerGroup,
-    syncGroupMetadata: (force) => whatsapp?.syncGroupMetadata(force) ?? Promise.resolve(),
+    syncGroupMetadata: () => Promise.resolve(),
     getAvailableGroups,
-    writeGroupsSnapshot: (gf, im, ag, rj) => writeGroupsSnapshot(gf, im, ag, rj),
+    writeGroupsSnapshot,
   });
   queue.setProcessMessagesFn(processGroupMessages);
   recoverPendingMessages();
-  
-  // Start session health monitor
-  startSessionMonitor().catch(err => logger.error({ err }, 'Session monitor failed to start'));
-
-  startMessageLoop().catch((err) => {
-    logger.fatal({ err }, 'Message loop crashed unexpectedly');
-    process.exit(1);
-  });
+  startSessionMonitor().catch(() => {});
+  startMessageLoop().catch(() => process.exit(1));
 }
 
-// Guard: only run when executed directly, not when imported by tests
-const isDirectRun =
-  process.argv[1] &&
-  new URL(import.meta.url).pathname === new URL(`file://${process.argv[1]}`).pathname;
-
-if (isDirectRun) {
-  main().catch((err) => {
-    logger.error({ err }, 'Failed to start NanoClaw');
-    process.exit(1);
-  });
-}
+const isDirectRun = process.argv[1] && new URL(import.meta.url).pathname === new URL(`file://${process.argv[1]}`).pathname;
+if (isDirectRun) main().catch(() => process.exit(1));

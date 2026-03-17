@@ -28,8 +28,8 @@ import { validateAdditionalMounts } from './mount-security.js';
 import { RegisteredGroup } from './types.js';
 
 // Sentinel markers for robust output parsing (must match agent-runner)
-const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+const OUTPUT_START_MARKER = '###NC_JSON_START###';
+const OUTPUT_END_MARKER = '###NC_JSON_END###';
 
 export interface ContainerInput {
   prompt: string;
@@ -41,6 +41,9 @@ export interface ContainerInput {
   assistantName?: string;
   secrets?: Record<string, string>;
   provider?: string;
+  isIsolated?: boolean; // Branch flag
+  projectPath?: string; // Target project sub-folder
+  personaOverride?: string; // PATCH: Dynamic Persona
 }
 
 export interface ContainerOutput {
@@ -58,89 +61,110 @@ interface VolumeMount {
 
 /**
  * Translate a local path (inside the bot container) to a host path
- * for Docker-out-of-Docker (DooD) support.
  */
 function toHostPath(localPath: string): string {
-  // Special case: SSH socket translation for DooD
   if (localPath === '/ssh-agent' && process.env.HOST_SSH_AUTH_SOCK) {
     return process.env.HOST_SSH_AUTH_SOCK;
   }
-
-  // Special case: Gemini session path
   if (localPath === "/root/.gemini" || localPath === GEMINI_SESSION_PATH) {
       return "/home/ubuntu/.gemini";
   }
-
   if (!HOST_PROJECT_PATH) return localPath;
-  
   const projectRoot = process.cwd();
-  // Ensure we are comparing absolute paths
   const absoluteLocal = path.resolve(localPath);
   const absoluteProject = path.resolve(projectRoot);
-
   if (absoluteLocal.startsWith(absoluteProject)) {
     const relative = path.relative(absoluteProject, absoluteLocal);
     return path.join(HOST_PROJECT_PATH, relative);
   }
-  
   return localPath;
 }
 
 /**
- * Ensure a directory exists and is writable by the container's node user (UID 1000).
- * Since the bot runs as root, newly created directories are root-owned.
+ * Ensure a directory exists and is writable by the container's node user
  */
 function ensureWritableDir(dirPath: string): void {
   if (!fs.existsSync(dirPath)) {
     fs.mkdirSync(dirPath, { recursive: true });
   }
-  
-  // If we are root, ensure the directory is owned/writable by UID 1000 (node user)
   if (process.getuid?.() === 0) {
     try {
-      // 1000:1000 is the default 'node' user in official images
       fs.chownSync(dirPath, 1000, 1000);
-    } catch (err) {
-      // Ignore errors (e.g. on filesystems that don't support ownership)
-    }
+    } catch {}
   }
 }
 
 function buildVolumeMounts(
   group: RegisteredGroup,
-  isMain: boolean,
+  input: ContainerInput,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   
-  // DECLARATIVE SECURITY: STRICT WORKSPACE ISOLATION
-  // We use the group folder name to isolate each chat/group
-  // Assumption: Host directory /home/ubuntu/powerhouse/workspaces exists.
-  const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}`;
-  mounts.push({
-    hostPath: hostWorkspace,
-    containerPath: '/workspace/group',
-    readonly: false,
-  });
+  if (input.isIsolated && input.projectPath) {
+    const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}/${input.projectPath}`;
+    mounts.push({
+      hostPath: hostWorkspace,
+      containerPath: '/workspace',
+      readonly: false,
+    });
+    
+    // PERSONA LIBRARY MOUNT (Isolated workers need access to the .md files)
+    mounts.push({
+        hostPath: '/home/ubuntu/powerhouse/orchestrator/.agents',
+        containerPath: '/app/.agents',
+        readonly: true
+    });
 
-  // ACTIVE SESSIONS (Read-Only)
-  // Needed for persona injection by the agent-runner
+    logger.info({ group: group.name, project: input.projectPath }, 'Experimental Walled Garden active');
+  } else {
+    const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}`;
+    mounts.push({
+      hostPath: hostWorkspace,
+      containerPath: '/workspace/group',
+      readonly: false,
+    });
+  }
+
   mounts.push({
     hostPath: '/home/ubuntu/powerhouse/data/active_sessions',
     containerPath: '/workspace/active_sessions',
     readonly: true,
   });
 
-  // Gemini CLI Session Mount (Safe, maps to user home)
-  if (PROVIDER === 'gemini-cli' && fs.existsSync(GEMINI_SESSION_PATH)) {
-    mounts.push({
-      hostPath: "/home/ubuntu/.gemini",
-      containerPath: '/root/.gemini',
-      readonly: false,
-    });
+  if (PROVIDER === 'gemini-cli') {
+    if (input.isIsolated) {
+        // MENTAL ISOLATION BOOTSTRAP: MOUNT AUTHENTICATION INDIVIDUALLY (READ-ONLY)
+        const authFiles = ['settings.json', 'google_accounts.json', 'oauth_creds.json', 'state.json', 'installation_id'];
+        for (const file of authFiles) {
+            const containerSrc = path.join(GEMINI_SESSION_PATH, file);
+            if (fs.existsSync(containerSrc) && !fs.statSync(containerSrc).isDirectory()) {
+                const hostSrc = `/home/ubuntu/.gemini/${file}`;
+                mounts.push({
+                    hostPath: hostSrc,
+                    containerPath: `/root/.gemini/${file}`,
+                    readonly: true
+                });
+            }
+        }
+        const sterileHistoryPath = `/tmp/sterile-history-${Date.now()}`;
+        fs.mkdirSync(sterileHistoryPath, { recursive: true });
+        fs.chmodSync(sterileHistoryPath, 0o777);
+        mounts.push({
+            hostPath: sterileHistoryPath,
+            containerPath: '/root/.gemini/history',
+            readonly: false
+        });
+        (input as any)._sterileCachePath = sterileHistoryPath;
+        logger.info({ sterileHistoryPath }, 'Mental Isolation: Individual auth files mounted read-only');
+    } else if (fs.existsSync(GEMINI_SESSION_PATH)) {
+        mounts.push({
+          hostPath: "/home/ubuntu/.gemini",
+          containerPath: '/root/.gemini',
+          readonly: false,
+        });
+    }
   }
 
-  // IPC Mount (Needed for task sync, etc.)
-  // Note: We use toHostPath because the bot needs to write to this too.
   const groupIpcDir = resolveGroupIpcPath(group.folder);
   mounts.push({
     hostPath: toHostPath(groupIpcDir),
@@ -148,7 +172,6 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // SSH Agent Forwarding
   if (process.env.SSH_AUTH_SOCK) {
     mounts.push({
       hostPath: toHostPath(process.env.SSH_AUTH_SOCK),
@@ -157,39 +180,12 @@ function buildVolumeMounts(
     });
   }
 
-  // NOTE: Mounts exposing orchestrator source or bot root have been removed 
-  // to prevent container escape/overwrite (Objective 2).
-
-  // Additional mounts
-  if (group.containerConfig?.additionalMounts) {
-    const validatedMounts = validateAdditionalMounts(
-      group.containerConfig.additionalMounts,
-      group.name,
-      isMain,
-    );
-    // Translate additional mounts as well if they are within project root
-    const translatedMounts = validatedMounts.map(m => ({
-      ...m,
-      hostPath: toHostPath(m.hostPath)
-    }));
-    mounts.push(...translatedMounts);
-  }
-
   return mounts;
 }
 
-/**
- * Read allowed secrets from .env for passing to the container via stdin.
- * Secrets are never written to disk or mounted as files.
- */
 function readSecrets(): Record<string, string> {
   const secrets = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
-  
-  // Inject Skill Service PSK if available
-  if (SKILL_SERVICE_PSK) {
-    secrets.SKILL_SERVICE_PSK = SKILL_SERVICE_PSK;
-  }
-  
+  if (SKILL_SERVICE_PSK) secrets.SKILL_SERVICE_PSK = SKILL_SERVICE_PSK;
   return secrets;
 }
 
@@ -199,48 +195,50 @@ function buildContainerArgs(
   input?: ContainerInput,
 ): string[] {
   const args: string[] = ['run', '-i', '--rm', '--name', containerName];
-
-  // TELEMETRY & HARDENING INJECTION (Objective 1)
   args.push('-e', 'CI=true');
   args.push('-e', 'NONINTERACTIVE=1');
-  args.push('-e', 'DEFAULT_SYSTEM_PROMPT_PATH=/workspace/active_sessions/pilot-alpha_pm_prompt.txt');
+  
+  // PATCH: Dynamic Persona Routing (Stabilized)
+  if (input?.isIsolated && input?.personaOverride) {
+      // Normalize persona name: trim, lowercase, replace spaces with hyphens
+      const persona = input.personaOverride.trim().toLowerCase().replace(/ /g, '-');
+      
+      // Map common aliases or special characters
+      let personaFile = `${persona}.md`;
+      if (persona === 'peer-pm') personaFile = 'peer_pm.md';
+      
+      const personaPath = `/app/.agents/personas/${personaFile}`;
+      
+      args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=${personaPath}`);
+      args.push('-e', 'ISOLATED_WORKSPACE=true');
+      logger.info({ persona, personaPath }, 'Routing dynamic isolated persona');
+  } else {
+      args.push('-e', 'DEFAULT_SYSTEM_PROMPT_PATH=/workspace/active_sessions/pilot-alpha_pm_prompt.txt');
+  }
 
-  // Pass host timezone so container's local time matches the user's
   args.push('-e', `TZ=${TIMEZONE}`);
-
-  // Skill Service configuration
   if (SKILL_SERVICE_URL) {
     args.push('-e', `SKILL_SERVICE_URL=${SKILL_SERVICE_URL}`);
-    // If we are in a docker-compose environment, we likely want to be on the same network
-    // 'core-net' is the default for our orchestrator stack.
     args.push('--network', 'infra_core-net'); 
   }
+  if (process.env.SSH_AUTH_SOCK) args.push('-e', 'SSH_AUTH_SOCK=/ssh-agent');
 
-  // SSH Agent Forwarding
-  if (process.env.SSH_AUTH_SOCK) {
-    args.push('-e', 'SSH_AUTH_SOCK=/ssh-agent');
-  }
-
-  // Run as host user so bind-mounted files are accessible.
-  // Skip when running as root (uid 0), as the container's node user (uid 1000),
-  // or when getuid is unavailable (native Windows without WSL).
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
-  if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
+  if (input?.isIsolated) {
+      args.push("--workdir", "/workspace");
+      // Walled Garden needs root for /root/.gemini access
+      args.push('--user', '0:0');
+  } else if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
   }
 
   for (const mount of mounts) {
-    if (mount.readonly) {
-      args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
-    } else {
-      args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
-    }
+    if (mount.readonly) args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));
+    else args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
   }
-
   args.push(CONTAINER_IMAGE);
-
   return args;
 }
 
@@ -251,46 +249,21 @@ export async function runContainerAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
-
   const groupDir = resolveGroupFolderPath(group.folder);
   ensureWritableDir(groupDir);
-
-  const mounts = buildVolumeMounts(group, input.isMain);
+  const mounts = buildVolumeMounts(group, input);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-agent-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName, input);
 
-  logger.debug(
-    {
-      group: group.name,
-      containerName,
-      mounts: mounts.map(
-        (m) =>
-          `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
-      ),
-      containerArgs: containerArgs.join(' '),
-    },
-    'Container mount configuration',
-  );
-
-  logger.info(
-    {
-      group: group.name,
-      containerName,
-      mountCount: mounts.length,
-      isMain: input.isMain,
-    },
-    'Spawning container agent',
-  );
+  logger.debug({ group: group.name, containerName, containerArgs: containerArgs.join(' ') }, 'Container configuration');
+  logger.info({ group: group.name, containerName, isMain: input.isMain }, 'Spawning container agent');
 
   const logsDir = path.join(groupDir, 'logs');
   ensureWritableDir(logsDir);
 
   return new Promise((resolve) => {
-    const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
+    const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
     onProcess(container, containerName);
 
     let stdout = '';
@@ -298,15 +271,12 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    // Pass secrets via stdin (never written to disk or mounted as files)
     input.secrets = readSecrets();
     input.provider = PROVIDER;
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
-    // Remove secrets from input so they don't appear in logs
     delete input.secrets;
 
-    // Streaming output: parse OUTPUT_START/END marker pairs as they arrive
     let parseBuffer = '';
     let newSessionId: string | undefined;
     let outputChain = Promise.resolve();
@@ -314,51 +284,33 @@ export async function runContainerAgent(
 
     container.stdout.on('data', (data) => {
       const chunk = data.toString();
-
-      // Always accumulate for logging
       if (!stdoutTruncated) {
         const remaining = CONTAINER_MAX_OUTPUT_SIZE - stdout.length;
         if (chunk.length > remaining) {
           stdout += chunk.slice(0, remaining);
           stdoutTruncated = true;
-          logger.warn(
-            { group: group.name, size: stdout.length },
-            'Container stdout truncated due to size limit',
-          );
-        } else {
-          stdout += chunk;
-        }
+        } else stdout += chunk;
       }
 
-      // Stream-parse for output markers
       if (onOutput) {
         parseBuffer += chunk;
         let startIdx: number;
         while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
           const endIdx = parseBuffer.indexOf(OUTPUT_END_MARKER, startIdx);
-          if (endIdx === -1) break; // Incomplete pair, wait for more data
-
-          const jsonStr = parseBuffer
-            .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
-            .trim();
-          parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
-
+          if (endIdx === -1) break;
+          const jsonStr = parseBuffer.slice(startIdx + OUTPUT_START_MARKER.length, endIdx).trim();
+          
           try {
             const parsed: ContainerOutput = JSON.parse(jsonStr);
-            if (parsed.newSessionId) {
-              newSessionId = parsed.newSessionId;
-            }
+            if (parsed.newSessionId) newSessionId = parsed.newSessionId;
             hadStreamingOutput = true;
-            // Activity detected — reset the hard timeout
             resetTimeout();
-            // Call onOutput for all markers (including null results)
-            // so idle timers start even for "silent" query completions.
             outputChain = outputChain.then(() => onOutput(parsed));
+            parseBuffer = parseBuffer.slice(endIdx + OUTPUT_END_MARKER.length);
           } catch (err) {
-            logger.warn(
-              { group: group.name, error: err, jsonStr, stdout, stderr },
-              'Failed to parse streamed output chunk',
-            );
+            const nextStartIdx = parseBuffer.indexOf(OUTPUT_START_MARKER, startIdx + 1);
+            if (nextStartIdx !== -1) parseBuffer = parseBuffer.slice(nextStartIdx);
+            else break;
           }
         }
       }
@@ -366,46 +318,25 @@ export async function runContainerAgent(
 
     container.stderr.on('data', (data) => {
       const chunk = data.toString();
-      const lines = chunk.trim().split('\n');
-      for (const line of lines) {
-        if (line) logger.debug({ container: group.folder }, line);
-      }
-      // Don't reset timeout on stderr — SDK writes debug logs continuously.
-      // Timeout only resets on actual output (OUTPUT_MARKER in stdout).
-      if (stderrTruncated) return;
-      const remaining = CONTAINER_MAX_OUTPUT_SIZE - stderr.length;
-      if (chunk.length > remaining) {
-        stderr += chunk.slice(0, remaining);
-        stderrTruncated = true;
-        logger.warn(
-          { group: group.name, size: stderr.length },
-          'Container stderr truncated due to size limit',
-        );
-      } else {
-        stderr += chunk;
+      if (!stderrTruncated) {
+        const remaining = CONTAINER_MAX_OUTPUT_SIZE - stderr.length;
+        if (chunk.length > remaining) {
+          stderr += chunk.slice(0, remaining);
+          stderrTruncated = true;
+        } else stderr += chunk;
       }
     });
 
     let timedOut = false;
     const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
-    // Grace period: hard timeout must be at least IDLE_TIMEOUT + 30s so the
-    // graceful _close sentinel has time to trigger before the hard kill fires.
     const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
-
     const killOnTimeout = () => {
       timedOut = true;
-      logger.error({ group: group.name, containerName }, 'Container timeout, stopping gracefully');
       exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
-        if (err) {
-          logger.warn({ group: group.name, containerName, err }, 'Graceful stop failed, force killing');
-          container.kill('SIGKILL');
-        }
+        if (err) container.kill('SIGKILL');
       });
     };
-
     let timeout = setTimeout(killOnTimeout, timeoutMs);
-
-    // Reset the timeout whenever there's activity (streaming output)
     const resetTimeout = () => {
       clearTimeout(timeout);
       timeout = setTimeout(killOnTimeout, timeoutMs);
@@ -415,250 +346,74 @@ export async function runContainerAgent(
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
 
-      if (timedOut) {
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        const timeoutLog = path.join(logsDir, `container-${ts}.log`);
-        fs.writeFileSync(timeoutLog, [
-          `=== Container Run Log (TIMEOUT) ===`,
-          `Timestamp: ${new Date().toISOString()}`,
-          `Group: ${group.name}`,
-          `Container: ${containerName}`,
-          `Duration: ${duration}ms`,
-          `Exit Code: ${code}`,
-          `Had Streaming Output: ${hadStreamingOutput}`,
-        ].join('\n'));
-        if (process.getuid?.() === 0) fs.chownSync(timeoutLog, 1000, 1000);
+      if ((input as any)._sterileCachePath) {
+        try { fs.rmSync((input as any)._sterileCachePath, { recursive: true, force: true }); } catch {}
+      }
 
-        // Timeout after output = idle cleanup, not failure.
-        // The agent already sent its response; this is just the
-        // container being reaped after the idle period expired.
+      if (timedOut) {
         if (hadStreamingOutput) {
-          logger.info(
-            { group: group.name, containerName, duration, code },
-            'Container timed out after output (idle cleanup)',
-          );
-          outputChain.then(() => {
-            resolve({
-              status: 'success',
-              result: null,
-              newSessionId,
-            });
-          });
+          outputChain.then(() => resolve({ status: 'success', result: null, newSessionId }));
           return;
         }
-
-        logger.error(
-          { group: group.name, containerName, duration, code },
-          'Container timed out with no output',
-        );
-
-        resolve({
-          status: 'error',
-          result: null,
-          error: `Container timed out after ${configTimeout}ms`,
-        });
+        resolve({ status: 'error', result: null, error: `Container timed out after ${configTimeout}ms` });
         return;
       }
 
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const logFile = path.join(logsDir, `container-${timestamp}.log`);
-
-      const logLines = [
-        `=== Container Run Log ===`,
-        `Timestamp: ${new Date().toISOString()}`,
-        `Group: ${group.name}`,
-        `IsMain: ${input.isMain}`,
-        `Duration: ${duration}ms`,
-        `Exit Code: ${code}`,
-        `Stdout Truncated: ${stdoutTruncated}`,
-        `Stderr Truncated: ${stderrTruncated}`,
-        ``,
-        `=== Input ===`,
-        JSON.stringify(input, null, 2),
-        ``,
-        `=== Container Args ===`,
-        containerArgs.join(' '),
-        ``,
-        `=== Mounts ===`,
-        mounts
-          .map(
-            (m) =>
-              `${m.hostPath} -> ${m.containerPath}${m.readonly ? ' (ro)' : ''}`,
-          )
-          .join('\n'),
-        ``,
-        `=== Stderr${stderrTruncated ? ' (TRUNCATED)' : ''} ===`,
-        stderr,
-        ``,
-        `=== Stdout${stdoutTruncated ? ' (TRUNCATED)' : ''} ===`,
-        stdout,
-      ];
-
+      const logFile = path.join(logsDir, `container-${new Date().toISOString().replace(/[:.]/g, '-')}.log`);
+      const logLines = [`=== Container Run Log ===`, `Duration: ${duration}ms`, `Exit Code: ${code}`, ``, `=== Input ===`, JSON.stringify(input, null, 2), ``, `=== Stderr ===`, stderr, ``, `=== Stdout ===`, stdout];
       fs.writeFileSync(logFile, logLines.join('\n'));
       if (process.getuid?.() === 0) fs.chownSync(logFile, 1000, 1000);
 
       if (code !== 0) {
-        logger.error(
-          {
-            group: group.name,
-            code,
-            duration,
-            stderr,
-            stdout,
-            logFile,
-          },
-          'Container exited with error',
-        );
-
-        resolve({
-          status: 'error',
-          result: null,
-          error: `Container exited with code ${code}: ${stderr.slice(-200)}`,
-        });
+        resolve({ status: 'error', result: null, error: `Container exited with code ${code}` });
         return;
       }
 
-      // Streaming mode: wait for output chain to settle, return completion marker
       if (onOutput) {
-        outputChain.then(() => {
-          logger.info(
-            { group: group.name, duration, newSessionId },
-            'Container completed (streaming mode)',
-          );
-          resolve({
-            status: 'success',
-            result: null,
-            newSessionId,
-          });
-        });
+        outputChain.then(() => resolve({ status: 'success', result: null, newSessionId }));
         return;
       }
 
-      // Legacy mode: parse the last output marker pair from accumulated stdout
       try {
-        // Extract JSON between sentinel markers for robust parsing
         const startIdx = stdout.lastIndexOf(OUTPUT_START_MARKER);
         const endIdx = stdout.lastIndexOf(OUTPUT_END_MARKER);
-
-        let jsonLine: string;
         if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-          jsonLine = stdout
-            .slice(startIdx + OUTPUT_START_MARKER.length, endIdx)
-            .trim();
+          const jsonStr = stdout.slice(startIdx + OUTPUT_START_MARKER.length, endIdx).trim();
+          const output: ContainerOutput = JSON.parse(jsonStr);
+          resolve(output);
         } else {
-          // Fallback: last non-empty line (backwards compatibility)
-          const lines = stdout.trim().split('\n');
-          jsonLine = lines[lines.length - 1];
+          const output: ContainerOutput = JSON.parse(stdout.trim());
+          resolve(output);
         }
-
-        if (!jsonLine) throw new Error("No output markers found and stdout is empty");
-
-        const output: ContainerOutput = JSON.parse(jsonLine);
-
-        logger.info(
-          {
-            group: group.name,
-            duration,
-            status: output.status,
-            hasResult: !!output.result,
-          },
-          'Container completed',
-        );
-
-        resolve(output);
       } catch (err: any) {
-        logger.error(
-          {
-            group: group.name,
-            stdout,
-            stderr,
-            error: err,
-          },
-          'Failed to parse container output',
-        );
-
-        resolve({
-          status: 'error',
-          result: null,
-          error: `Failed to parse container output: ${err.message}`,
-        });
+        logger.error({ group: group.name, error: err.message, stdout: stdout.slice(-500) }, 'Failed to parse container output');
+        resolve({ status: 'error', result: null, error: `Failed to parse container output: ${err.message}` });
       }
     });
 
     container.on('error', (err) => {
       clearTimeout(timeout);
-      logger.error({ group: group.name, containerName, error: err }, 'Container spawn error');
-      resolve({
-        status: 'error',
-        result: null,
-        error: `Container spawn error: ${err.message}`,
-      });
+      resolve({ status: 'error', result: null, error: `Container spawn error: ${err.message}` });
     });
   });
 }
 
-export function writeTasksSnapshot(
-  groupFolder: string,
-  isMain: boolean,
-  tasks: Array<{
-    id: string;
-    groupFolder: string;
-    prompt: string;
-    schedule_type: string;
-    schedule_value: string;
-    status: string;
-    next_run: string | null;
-  }>,
-): void {
-  // Write filtered tasks to the group's IPC directory
+export function writeTasksSnapshot(groupFolder: string, isMain: boolean, tasks: any[]): void {
   const groupIpcDir = resolveGroupIpcPath(groupFolder);
   ensureWritableDir(groupIpcDir);
-
-  // Main sees all tasks, others only see their own
-  const filteredTasks = isMain
-    ? tasks
-    : tasks.filter((t) => t.groupFolder === groupFolder);
-
+  const filteredTasks = isMain ? tasks : tasks.filter((t) => t.groupFolder === groupFolder);
   const tasksFile = path.join(groupIpcDir, 'current_tasks.json');
   fs.writeFileSync(tasksFile, JSON.stringify(filteredTasks, null, 2));
   if (process.getuid?.() === 0) fs.chownSync(tasksFile, 1000, 1000);
 }
 
-export interface AvailableGroup {
-  jid: string;
-  name: string;
-  lastActivity: string;
-  isRegistered: boolean;
-}
+export interface AvailableGroup { jid: string; name: string; lastActivity: string; isRegistered: boolean; }
 
-/**
- * Write available groups snapshot for the container to read.
- * Only main group can see all available groups (for activation).
- * Non-main groups only see their own registration status.
- */
-export function writeGroupsSnapshot(
-  groupFolder: string,
-  isMain: boolean,
-  groups: AvailableGroup[],
-  registeredJids: Set<string>,
-): void {
+export function writeGroupsSnapshot(groupFolder: string, isMain: boolean, groups: AvailableGroup[], registeredJids: Set<string>): void {
   const groupIpcDir = resolveGroupIpcPath(groupFolder);
   ensureWritableDir(groupIpcDir);
-
-  // Main sees all groups; others see nothing (they can't activate groups)
   const visibleGroups = isMain ? groups : [];
-
   const groupsFile = path.join(groupIpcDir, 'available_groups.json');
-  fs.writeFileSync(
-    groupsFile,
-    JSON.stringify(
-      {
-        groups: visibleGroups,
-        lastSync: new Date().toISOString(),
-      },
-      null,
-      2,
-    ),
-  );
+  fs.writeFileSync(groupsFile, JSON.stringify({ groups: visibleGroups, lastSync: new Date().toISOString() }, null, 2));
   if (process.getuid?.() === 0) fs.chownSync(groupsFile, 1000, 1000);
 }
