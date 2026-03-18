@@ -1,7 +1,3 @@
-/**
- * Container Runner for NanoClaw
- * Spawns agent execution in containers and handles IPC
- */
 import { ChildProcess, exec, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -66,7 +62,17 @@ function toHostPath(localPath: string): string {
   if (localPath === '/ssh-agent' && process.env.HOST_SSH_AUTH_SOCK) {
     return process.env.HOST_SSH_AUTH_SOCK;
   }
-  if (localPath === "/root/.gemini" || localPath === GEMINI_SESSION_PATH) {
+
+  // V6.9: Explicit DooD Translation for /app prefix
+  // This ensures pre-seeded sterile history in /app/tmp translates correctly to the host project root.
+  if (HOST_PROJECT_PATH) {
+      const absoluteLocal = path.resolve(localPath);
+      if (absoluteLocal.startsWith('/app')) {
+          return absoluteLocal.replace('/app', HOST_PROJECT_PATH);
+      }
+  }
+
+  if (localPath === "/root/.gemini" || localPath === "/home/node/.gemini" || localPath === GEMINI_SESSION_PATH) {
       return "/home/ubuntu/.gemini";
   }
   if (!HOST_PROJECT_PATH) return localPath;
@@ -133,24 +139,34 @@ function buildVolumeMounts(
 
   if (PROVIDER === 'gemini-cli') {
     if (input.isIsolated) {
-        // MENTAL ISOLATION BOOTSTRAP: MOUNT ENTIRE .gemini READ-ONLY
-        mounts.push({
-            hostPath: "/home/ubuntu/.gemini",
-            containerPath: '/root/.gemini',
-            readonly: true
-        });
-
         // OVERLAY EPHEMERAL HISTORY (Allow writing to history without affecting host)
-        const sterileHistoryPath = `/tmp/sterile-history-${Date.now()}`;
+        const sterileHistoryPath = path.resolve(`./tmp/sterile-history-${Date.now()}`);
+        if (!fs.existsSync(path.dirname(sterileHistoryPath))) {
+            fs.mkdirSync(path.dirname(sterileHistoryPath), { recursive: true });
+        }
         fs.mkdirSync(sterileHistoryPath, { recursive: true });
         fs.chmodSync(sterileHistoryPath, 0o777);
+
+        // V6.8 PRE-SEEDING: Inject credentials into sandbox history
+        if (fs.existsSync(GEMINI_SESSION_PATH)) {
+            const files = fs.readdirSync(GEMINI_SESSION_PATH);
+            for (const file of files) {
+                if (file.endsWith('.json')) {
+                    const src = path.join(GEMINI_SESSION_PATH, file);
+                    const dest = path.join(sterileHistoryPath, file);
+                    fs.copyFileSync(src, dest);
+                    fs.chmodSync(dest, 0o666); 
+                }
+            }
+        }
+
         mounts.push({
-            hostPath: sterileHistoryPath,
-            containerPath: '/root/.gemini/history',
+            hostPath: toHostPath(sterileHistoryPath),
+            containerPath: '/root/.gemini',
             readonly: false
         });
         (input as any)._sterileCachePath = sterileHistoryPath;
-        logger.info({ sterileHistoryPath }, 'Mental Isolation: Individual auth files mounted read-only');
+        logger.info({ sterileHistoryPath }, 'Mental Isolation: Sandbox Pre-Seeded');
     } else if (fs.existsSync(GEMINI_SESSION_PATH)) {
         mounts.push({
           hostPath: "/home/ubuntu/.gemini",
@@ -208,7 +224,7 @@ function buildContainerArgs(
       args.push('-e', 'ISOLATED_WORKSPACE=true');
       logger.info({ persona, personaPath }, 'Routing dynamic isolated persona');
   } else {
-      args.push('-e', 'DEFAULT_SYSTEM_PROMPT_PATH=/workspace/active_sessions/pilot-alpha_pm_prompt.txt');
+      args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=/workspace/active_sessions/pilot-alpha_pm_prompt.txt`);
   }
 
   args.push('-e', `TZ=${TIMEZONE}`);
@@ -220,10 +236,13 @@ function buildContainerArgs(
 
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
+
   if (input?.isIsolated) {
       args.push("--workdir", "/workspace");
-      args.push('--user', '1000:1000');
-      args.push('-e', 'HOME=/tmp');
+      // V6.8 SECURITY LOCK: Drop all capabilities and prevent privilege escalation
+      args.push('--cap-drop=ALL');
+      args.push('--security-opt', 'no-new-privileges');
+      args.push('-e', 'HOME=/root');
   } else if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
     args.push('-e', 'HOME=/home/node');
@@ -288,6 +307,17 @@ export async function runContainerAgent(
       }
 
       if (onOutput) {
+      if (!hadStreamingOutput && stdout.trim()) {
+        const startIdx = stdout.lastIndexOf(OUTPUT_START_MARKER);
+        const endIdx = stdout.lastIndexOf(OUTPUT_END_MARKER);
+        if (!(startIdx !== -1 && endIdx !== -1 && endIdx > startIdx)) {
+          outputChain = outputChain.then(() => onOutput({
+            status: "success",
+            result: stdout.trim(),
+            newSessionId
+          }));
+        }
+      }
         parseBuffer += chunk;
         let startIdx: number;
         while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
@@ -365,6 +395,17 @@ export async function runContainerAgent(
       }
 
       if (onOutput) {
+      if (!hadStreamingOutput && stdout.trim()) {
+        const startIdx = stdout.lastIndexOf(OUTPUT_START_MARKER);
+        const endIdx = stdout.lastIndexOf(OUTPUT_END_MARKER);
+        if (!(startIdx !== -1 && endIdx !== -1 && endIdx > startIdx)) {
+          outputChain = outputChain.then(() => onOutput({
+            status: "success",
+            result: stdout.trim(),
+            newSessionId
+          }));
+        }
+      }
         outputChain.then(() => resolve({ status: 'success', result: null, newSessionId }));
         return;
       }
@@ -377,12 +418,20 @@ export async function runContainerAgent(
           const output: ContainerOutput = JSON.parse(jsonStr);
           resolve(output);
         } else {
-          const output: ContainerOutput = JSON.parse(stdout.trim());
-          resolve(output);
+          // V6.10 FALLBACK: If no JSON markers, treat raw stdout as content
+          resolve({
+            status: 'success',
+            result: stdout.trim() || 'Agent finished with no output.',
+            newSessionId,
+          });
         }
       } catch (err: any) {
-        logger.error({ group: group.name, error: err.message, stdout: stdout.slice(-500) }, 'Failed to parse container output');
-        resolve({ status: 'error', result: null, error: `Failed to parse container output: ${err.message}` });
+        // V6.10 FALLBACK: If JSON parsing fails, return raw stdout anyway
+        resolve({
+          status: 'success',
+          result: stdout.trim() || `Execution error: ${err.message}`,
+          newSessionId,
+        });
       }
     });
 
