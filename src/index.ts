@@ -171,7 +171,7 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
   let projectPath = '';
   let personaOverride = '';
   const firstMsg = validMessages[0].content;
-  if (firstMsg.includes('[V6_ISOLATE:')) {
+  if (firstMsg.toLowerCase().includes('v6_isolate')) {
     const match = firstMsg.match(/\[V6_ISOLATE:([^\]]+)\]/);
     if (match) {
         isIsolated = true;
@@ -200,7 +200,7 @@ export async function processGroupMessages(chatJid: string): Promise<boolean> {
   const sanitizedMessages = validMessages.map(m => ({
       ...m,
       content: m.content
-        .replace(/\[V6_ISOLATE:[^\]]+\]/, '')
+        .replace(/(?:\[V6_ISOLATE:[^\]]+\]|v6_isolate\s+[^\s]+)/i, '')
         .replace(/\[ROLE:[^\]]+\]/, '')
         .trim()
   }));
@@ -383,7 +383,7 @@ async function startMessageLoop(): Promise<void> {
           if (!channel) continue;
 
           const isMainGroup = group.folder === MAIN_GROUP_FOLDER;
-          const isIsolationRequest = groupMessages.some(m => m.content.includes('[V6_ISOLATE:'));
+          const isIsolationRequest = groupMessages.some(m => m.content.toLowerCase().includes('v6_isolate'));
           const needsTrigger = !isMainGroup && group.requiresTrigger !== false && !isIsolationRequest;
 
           if (needsTrigger) {
@@ -405,7 +405,7 @@ async function startMessageLoop(): Promise<void> {
           const sanitizedMessages = messagesToSend.map(m => ({
               ...m,
               content: m.content
-                .replace(/\[V6_ISOLATE:[^\]]+\]/, '')
+                .replace(/(?:\[V6_ISOLATE:[^\]]+\]|v6_isolate\s+[^\s]+)/i, '')
                 .replace(/\[ROLE:[^\]]+\]/, '')
                 .trim()
           }));

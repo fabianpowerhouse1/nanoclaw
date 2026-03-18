@@ -140,8 +140,10 @@ function buildVolumeMounts(
   if (PROVIDER === 'gemini-cli') {
     if (input.isIsolated) {
         // OVERLAY EPHEMERAL HISTORY (Allow writing to history without affecting host)
-        const sterileHistoryPath = path.resolve(`./tmp/sterile-history-${Date.now()}`);
-        if (!fs.existsSync(path.dirname(sterileHistoryPath))) {
+        const sterileHistoryPath = path.resolve(`./data/tmp/sterile-history-${Date.now()}`);
+        const tmpDir = path.dirname(sterileHistoryPath);
+        if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+        if (false) {
             fs.mkdirSync(path.dirname(sterileHistoryPath), { recursive: true });
         }
         fs.mkdirSync(sterileHistoryPath, { recursive: true });
