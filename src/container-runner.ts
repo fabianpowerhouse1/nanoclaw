@@ -63,8 +63,6 @@ function toHostPath(localPath: string): string {
     return process.env.HOST_SSH_AUTH_SOCK;
   }
 
-  // V6.9: Explicit DooD Translation for /app prefix
-  // This ensures pre-seeded sterile history in /app/tmp translates correctly to the host project root.
   if (HOST_PROJECT_PATH) {
       const absoluteLocal = path.resolve(localPath);
       if (absoluteLocal.startsWith('/app')) {
@@ -86,9 +84,6 @@ function toHostPath(localPath: string): string {
   return localPath;
 }
 
-/**
- * Ensure a directory exists and is writable by the container's node user
- */
 function ensureWritableDir(dirPath: string): void {
   if (!fs.existsSync(dirPath)) {
     fs.mkdirSync(dirPath, { recursive: true });
@@ -103,9 +98,24 @@ function ensureWritableDir(dirPath: string): void {
 function buildVolumeMounts(
   group: RegisteredGroup,
   input: ContainerInput,
+  ephemeralHomePath?: string,
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   
+  if (input.isIsolated && ephemeralHomePath) {
+    mounts.push({
+      hostPath: toHostPath(ephemeralHomePath),
+      containerPath: '/root',
+      readonly: false,
+    });
+  } else if (PROVIDER === 'gemini-cli' && fs.existsSync(GEMINI_SESSION_PATH)) {
+    mounts.push({
+      hostPath: "/home/ubuntu/.gemini",
+      containerPath: '/root/.gemini',
+      readonly: false,
+    });
+  }
+
   if (input.isIsolated && input.projectPath) {
     const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}/${input.projectPath}`;
     mounts.push({
@@ -114,14 +124,11 @@ function buildVolumeMounts(
       readonly: false,
     });
     
-    // PERSONA LIBRARY MOUNT (Isolated workers need access to the .md files)
     mounts.push({
         hostPath: '/home/ubuntu/powerhouse/orchestrator/.agents',
         containerPath: '/app/.agents',
         readonly: true
     });
-
-    logger.info({ group: group.name, project: input.projectPath }, 'Experimental Walled Garden active');
   } else {
     const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}`;
     mounts.push({
@@ -136,47 +143,6 @@ function buildVolumeMounts(
     containerPath: '/workspace/active_sessions',
     readonly: true,
   });
-
-  if (PROVIDER === 'gemini-cli') {
-    if (input.isIsolated) {
-        // OVERLAY EPHEMERAL HISTORY (Allow writing to history without affecting host)
-        const sterileHistoryPath = path.resolve(`./data/tmp/sterile-history-${Date.now()}`);
-        const tmpDir = path.dirname(sterileHistoryPath);
-        if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
-        if (false) {
-            fs.mkdirSync(path.dirname(sterileHistoryPath), { recursive: true });
-        }
-        fs.mkdirSync(sterileHistoryPath, { recursive: true });
-        fs.chmodSync(sterileHistoryPath, 0o777);
-
-        // V6.8 PRE-SEEDING: Inject credentials into sandbox history
-        if (fs.existsSync(GEMINI_SESSION_PATH)) {
-            const files = fs.readdirSync(GEMINI_SESSION_PATH);
-            for (const file of files) {
-                if (file.endsWith('.json')) {
-                    const src = path.join(GEMINI_SESSION_PATH, file);
-                    const dest = path.join(sterileHistoryPath, file);
-                    fs.copyFileSync(src, dest);
-                    fs.chmodSync(dest, 0o666); 
-                }
-            }
-        }
-
-        mounts.push({
-            hostPath: toHostPath(sterileHistoryPath),
-            containerPath: '/root/.gemini',
-            readonly: false
-        });
-        (input as any)._sterileCachePath = sterileHistoryPath;
-        logger.info({ sterileHistoryPath }, 'Mental Isolation: Sandbox Pre-Seeded');
-    } else if (fs.existsSync(GEMINI_SESSION_PATH)) {
-        mounts.push({
-          hostPath: "/home/ubuntu/.gemini",
-          containerPath: '/root/.gemini',
-          readonly: false,
-        });
-    }
-  }
 
   const groupIpcDir = resolveGroupIpcPath(group.folder);
   mounts.push({
@@ -205,26 +171,23 @@ function readSecrets(): Record<string, string> {
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
-  input?: ContainerInput,
+  input?: ContainerInput, githubToken?: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--name', containerName];
   args.push('-e', 'CI=true');
   args.push('-e', 'NONINTERACTIVE=1');
+  if (githubToken) {
+    args.push('-e', `GH_TOKEN=${githubToken}`);
+    args.push('-e', `GITHUB_TOKEN=${githubToken}`);
+  }
   
-  // PATCH: Dynamic Persona Routing (Stabilized)
   if (input?.isIsolated && input?.personaOverride) {
-      // Normalize persona name: trim, lowercase, replace spaces with hyphens
       const persona = input.personaOverride.trim().toLowerCase().replace(/ /g, '-');
-      
-      // Map common aliases or special characters
       let personaFile = `${persona}.md`;
       if (persona === 'peer-pm') personaFile = 'peer_pm.md';
-      
       const personaPath = `/app/.agents/personas/${personaFile}`;
-      
       args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=${personaPath}`);
       args.push('-e', 'ISOLATED_WORKSPACE=true');
-      logger.info({ persona, personaPath }, 'Routing dynamic isolated persona');
   } else {
       args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=/workspace/active_sessions/pilot-alpha_pm_prompt.txt`);
   }
@@ -241,7 +204,6 @@ function buildContainerArgs(
 
   if (input?.isIsolated) {
       args.push("--workdir", "/workspace");
-      // V6.8 SECURITY LOCK: Drop all capabilities and prevent privilege escalation
       args.push('--cap-drop=ALL');
       args.push('--security-opt', 'no-new-privileges');
       args.push('-e', 'HOME=/root');
@@ -258,6 +220,19 @@ function buildContainerArgs(
   return args;
 }
 
+/**
+ * Redacts tokens from the args array for logging purposes
+ */
+function sanitizeContainerArgs(args: string[]): string[] {
+  return args.map(arg => {
+    if (arg.startsWith('GH_TOKEN=') || arg.startsWith('GITHUB_TOKEN=')) {
+      const parts = arg.split('=');
+      return `${parts[0]}=***`;
+    }
+    return arg;
+  });
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -267,13 +242,66 @@ export async function runContainerAgent(
   const startTime = Date.now();
   const groupDir = resolveGroupFolderPath(group.folder);
   ensureWritableDir(groupDir);
-  const mounts = buildVolumeMounts(group, input);
+
+  let githubToken: string | undefined;
+  try {
+    if (fs.existsSync('/run/secrets/github_token')) {
+      githubToken = fs.readFileSync('/run/secrets/github_token', 'utf8').trim();
+    }
+  } catch (e) {
+    logger.warn('Failed to read github_token secret');
+  }
+
+  // Graceful Degradation: Fallback to process.env.GITHUB_TOKEN
+  if (!githubToken && process.env.GITHUB_TOKEN) {
+    githubToken = process.env.GITHUB_TOKEN;
+  }
+
+  let ephemeralHomePath: string | undefined;
+  if (input.isIsolated) {
+    const tmpDir = path.join(DATA_DIR, 'tmp');
+    if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+    ephemeralHomePath = fs.mkdtempSync(path.join(tmpDir, 'agent-home-'));
+    
+    try {
+    const geminiDir = path.join(ephemeralHomePath, '.gemini');
+    fs.mkdirSync(geminiDir, { recursive: true });
+    if (fs.existsSync(GEMINI_SESSION_PATH)) {
+      ['settings.json', 'oauth_creds.json', 'projects.json', 'google_accounts.json'].forEach(file => {
+        const src = path.join(GEMINI_SESSION_PATH, file);
+        if (fs.existsSync(src)) fs.copyFileSync(src, path.join(geminiDir, file));
+          fs.chmodSync(path.join(geminiDir, file), 0o644);
+      });
+    }
+
+    const sshDir = path.join(ephemeralHomePath, '.ssh');
+    fs.mkdirSync(sshDir, { recursive: true });
+    const hostKey = '/root/.ssh/id_github_powerhouse';
+    if (fs.existsSync(hostKey)) {
+      const destKey = path.join(sshDir, 'id_rsa');
+      fs.copyFileSync(hostKey, destKey);
+      fs.chmodSync(destKey, 0o600);
+    }
+    
+    const gitConfig = '[user]\n  name = Powerhouse Agent\n  email = ai@powerhouse.local\n[core]\n  sshCommand = ssh -o StrictHostKeyChecking=no -i /root/.ssh/id_rsa';
+    fs.writeFileSync(path.join(ephemeralHomePath, '.gitconfig'), gitConfig);
+    } catch (err: any) {
+      logger.warn({ err: err.message }, 'Secure Secrets Proxy: Partial seeding failure, continuing without full credentials');
+    }
+  }
+
+  const mounts = buildVolumeMounts(group, input, ephemeralHomePath);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-agent-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName, input);
-
-  logger.debug({ group: group.name, containerName, containerArgs: containerArgs.join(' ') }, 'Container configuration');
-  logger.info({ group: group.name, containerName, isMain: input.isMain }, 'Spawning container agent');
+  const containerArgs = buildContainerArgs(mounts, containerName, input, githubToken);
+  
+  // Telemetry Redaction: Mask tokens if logging args
+  logger.info({ 
+    group: group.name, 
+    containerName, 
+    isMain: input.isMain,
+    args: sanitizeContainerArgs(containerArgs) 
+  }, 'Spawning container agent');
 
   const logsDir = path.join(groupDir, 'logs');
   ensureWritableDir(logsDir);
@@ -309,17 +337,6 @@ export async function runContainerAgent(
       }
 
       if (onOutput) {
-      if (!hadStreamingOutput && stdout.trim()) {
-        const startIdx = stdout.lastIndexOf(OUTPUT_START_MARKER);
-        const endIdx = stdout.lastIndexOf(OUTPUT_END_MARKER);
-        if (!(startIdx !== -1 && endIdx !== -1 && endIdx > startIdx)) {
-          outputChain = outputChain.then(() => onOutput({
-            status: "success",
-            result: stdout.trim(),
-            newSessionId
-          }));
-        }
-      }
         parseBuffer += chunk;
         let startIdx: number;
         while ((startIdx = parseBuffer.indexOf(OUTPUT_START_MARKER)) !== -1) {
@@ -373,72 +390,75 @@ export async function runContainerAgent(
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
 
-      if ((input as any)._sterileCachePath) {
-        try { fs.rmSync((input as any)._sterileCachePath, { recursive: true, force: true }); } catch {}
-      }
+      try {
+        if (timedOut) {
+          if (hadStreamingOutput) {
+            outputChain.then(() => resolve({ status: 'success', result: null, newSessionId }));
+            return;
+          }
+          resolve({ status: 'error', result: null, error: `Container timed out after ${configTimeout}ms` });
+          return;
+        }
 
-      if (timedOut) {
-        if (hadStreamingOutput) {
+        const logFile = path.join(logsDir, `container-${new Date().toISOString().replace(/[:.]/g, '-')}.log`);
+        const logLines = [`=== Container Run Log ===`, `Duration: ${duration}ms`, `Exit Code: ${code}`, ``, `=== Input ===`, JSON.stringify(input, null, 2), ``, `=== Stderr ===`, stderr, ``, `=== Stdout ===`, stdout];
+        fs.writeFileSync(logFile, logLines.join('\n'));
+        if (process.getuid?.() === 0) fs.chownSync(logFile, 1000, 1000);
+
+        if (code !== 0) {
+          resolve({ status: 'error', result: null, error: `Container exited with code ${code}` });
+          return;
+        }
+
+        if (onOutput) {
+          if (!hadStreamingOutput && stdout.trim()) {
+            const startIdx = stdout.lastIndexOf(OUTPUT_START_MARKER);
+            const endIdx = stdout.lastIndexOf(OUTPUT_END_MARKER);
+            if (!(startIdx !== -1 && endIdx !== -1 && endIdx > startIdx)) {
+              outputChain = outputChain.then(() => onOutput({
+                status: 'success',
+                result: stdout.trim(),
+                newSessionId,
+              }));
+            }
+          }
           outputChain.then(() => resolve({ status: 'success', result: null, newSessionId }));
           return;
         }
-        resolve({ status: 'error', result: null, error: `Container timed out after ${configTimeout}ms` });
-        return;
-      }
 
-      const logFile = path.join(logsDir, `container-${new Date().toISOString().replace(/[:.]/g, '-')}.log`);
-      const logLines = [`=== Container Run Log ===`, `Duration: ${duration}ms`, `Exit Code: ${code}`, ``, `=== Input ===`, JSON.stringify(input, null, 2), ``, `=== Stderr ===`, stderr, ``, `=== Stdout ===`, stdout];
-      fs.writeFileSync(logFile, logLines.join('\n'));
-      if (process.getuid?.() === 0) fs.chownSync(logFile, 1000, 1000);
-
-      if (code !== 0) {
-        resolve({ status: 'error', result: null, error: `Container exited with code ${code}` });
-        return;
-      }
-
-      if (onOutput) {
-      if (!hadStreamingOutput && stdout.trim()) {
-        const startIdx = stdout.lastIndexOf(OUTPUT_START_MARKER);
-        const endIdx = stdout.lastIndexOf(OUTPUT_END_MARKER);
-        if (!(startIdx !== -1 && endIdx !== -1 && endIdx > startIdx)) {
-          outputChain = outputChain.then(() => onOutput({
-            status: "success",
-            result: stdout.trim(),
-            newSessionId
-          }));
-        }
-      }
-        outputChain.then(() => resolve({ status: 'success', result: null, newSessionId }));
-        return;
-      }
-
-      try {
-        const startIdx = stdout.lastIndexOf(OUTPUT_START_MARKER);
-        const endIdx = stdout.lastIndexOf(OUTPUT_END_MARKER);
-        if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
-          const jsonStr = stdout.slice(startIdx + OUTPUT_START_MARKER.length, endIdx).trim();
-          const output: ContainerOutput = JSON.parse(jsonStr);
-          resolve(output);
-        } else {
-          // V6.10 FALLBACK: If no JSON markers, treat raw stdout as content
+        try {
+          const startIdx = stdout.lastIndexOf(OUTPUT_START_MARKER);
+          const endIdx = stdout.lastIndexOf(OUTPUT_END_MARKER);
+          if (startIdx !== -1 && endIdx !== -1 && endIdx > startIdx) {
+            const jsonStr = stdout.slice(startIdx + OUTPUT_START_MARKER.length, endIdx).trim();
+            const output: ContainerOutput = JSON.parse(jsonStr);
+            resolve(output);
+          } else {
+            resolve({
+              status: 'success',
+              result: stdout.trim() || 'Agent finished with no output.',
+              newSessionId,
+            });
+          }
+        } catch (err: any) {
           resolve({
             status: 'success',
-            result: stdout.trim() || 'Agent finished with no output.',
+            result: stdout.trim() || `Execution error: ${err.message}`,
             newSessionId,
           });
         }
-      } catch (err: any) {
-        // V6.10 FALLBACK: If JSON parsing fails, return raw stdout anyway
-        resolve({
-          status: 'success',
-          result: stdout.trim() || `Execution error: ${err.message}`,
-          newSessionId,
-        });
+      } finally {
+        if (ephemeralHomePath) {
+          try { fs.rmSync(ephemeralHomePath, { recursive: true, force: true }); } catch (e) {}
+        }
       }
     });
 
     container.on('error', (err) => {
       clearTimeout(timeout);
+      if (ephemeralHomePath) {
+        try { fs.rmSync(ephemeralHomePath, { recursive: true, force: true }); } catch (e) {}
+      }
       resolve({ status: 'error', result: null, error: `Container spawn error: ${err.message}` });
     });
   });
