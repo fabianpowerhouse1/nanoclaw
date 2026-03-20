@@ -1,5 +1,5 @@
-# V9.2 Skill Architecture Summary
+# V0.4 Skill Architecture Summary
 
-- **Modular Encapsulation**: Skills are now fully self-contained units with defined entry points, dependencies, and metadata, allowing for seamless injection into the agent runtime.
-- **Enhanced Hook System**: Introduced granular lifecycle hooks that allow skills to intercept and augment system-level events without modifying the core kernel.
-- **State Isolation**: Implementation of strict state sandboxing ensures that skill-specific data and memory remain isolated from other active skills, preventing cross-contamination.
+*   **Three-Level Resolution Model**: Prioritizes deterministic git merges (`merge-file`, `rerere`), escalates to Claude for intent-based conflict resolution, and only involves the user for genuine product ambiguities.
+*   **Shared Base & Three-Way Merges**: Maintains a clean core in `.nanoclaw/base/` as a common ancestor, enabling robust drift detection and reliable merging of both code logic and structured data (npm deps, env vars).
+*   **Safe Operations & State Tracking**: Implements a mandatory backup/restore flow for all modifications and records the complete system state (applied skills, file hashes, and resolutions) in `state.yaml` for deterministic replays.
