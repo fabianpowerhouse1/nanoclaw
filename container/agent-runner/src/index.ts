@@ -82,7 +82,7 @@ async function readStdin(): Promise<string> {
     });
     // Safety timeout for interactive shells
     if (process.stdin.isTTY) {
-        setTimeout(() => resolve(data), 100);
+      setTimeout(() => resolve(data), 100);
     }
   });
 }
@@ -97,7 +97,7 @@ async function runClaudeQuery(
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   log(`Running Claude query (session ID: ${sessionId || 'new'})`);
 
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const args = sessionId ? ['--session', sessionId] : [];
     const claude = spawn('claude', args, {
       env: {
@@ -115,14 +115,14 @@ async function runClaudeQuery(
     let newSessionId: string | undefined;
     let closedDuringQuery = false;
 
-    claude.stdout.on('data', (data) => {
+    claude.stdout.on('data', (data: Buffer) => {
       const chunk = data.toString();
       stdout += chunk;
       const sessionMatch = chunk.match(/Session ID: ([a-zA-Z0-9-]+)/);
       if (sessionMatch) newSessionId = sessionMatch[1];
     });
 
-    claude.stderr.on('data', (data) => {
+    claude.stderr.on('data', (data: Buffer) => {
       const line = data.toString().trim();
       if (line) log(`[claude-stderr] ${line}`);
     });
@@ -148,7 +148,7 @@ async function runGeminiQuery(
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   log(`Running Gemini query (session ID: ${sessionId || 'new'})`);
 
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     const gemini = spawn('gemini', ['-p', prompt, '--approval-mode', 'yolo'], {
       env: {
         ...process.env,
@@ -163,8 +163,8 @@ async function runGeminiQuery(
     let stdout = '';
     let closedDuringQuery = false;
 
-    gemini.stdout.on('data', (data) => { stdout += data.toString(); });
-    gemini.stderr.on('data', (data) => {
+    gemini.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
+    gemini.stderr.on('data', (data: Buffer) => {
       const line = data.toString().trim();
       if (line) log(`[gemini-stderr] ${line}`);
     });
@@ -198,12 +198,16 @@ async function main() {
     process.exit(1);
   }
   let input: ContainerInput;
-  try { input = JSON.parse(inputStr); } catch (err) {
+  try { 
+    input = JSON.parse(inputStr); 
+  } catch (err) {
     log('Input is not valid JSON, treating as raw prompt.');
     input = { prompt: inputStr, chatJid: 'manual-test', groupFolder: 'main', isMain: true, provider: process.env.PROVIDER || 'gemini-cli' };
   }
+
   const provider = input.provider || input.agentName || 'gemini-cli';
   log(`Provider: ${provider}, Chat: ${input.chatJid}`);
+
   const systemPromptPath = input.systemPromptPath || process.env.DEFAULT_SYSTEM_PROMPT_PATH;
   if (systemPromptPath) {
     try {
@@ -211,8 +215,11 @@ async function main() {
       const systemPrompt = await readFile(systemPromptPath, 'utf8');
       log(`=== INJECTED SYSTEM PROMPT ===\n${systemPrompt}`);
       input.prompt = `${systemPrompt}\n\n--- SYSTEM INSTRUCTIONS ---\n\n${input.prompt}`;
-    } catch (err: any) { log(`Warning: Failed to read system prompt at ${systemPromptPath}: ${err.message}`); }
+    } catch (err: any) { 
+      log(`Warning: Failed to read system prompt at ${systemPromptPath}: ${err.message}`); 
+    }
   }
+
   if (input.files && input.files.length > 0) {
     for (const file of input.files) {
       try {
@@ -220,20 +227,39 @@ async function main() {
         fs.mkdirSync(path.dirname(fullPath), { recursive: true });
         fs.writeFileSync(fullPath, file.content);
         log(`Created file: ${fullPath}`);
-      } catch (err) { log(`Warning: Failed to create file ${file.path}: ${err}`); }
+      } catch (err) { 
+        log(`Warning: Failed to create file ${file.path}: ${err}`); 
+      }
     }
   }
-  const sdkEnv: Record<string, string | undefined> = { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY, GOOGLE_API_KEY: process.env.GOOGLE_API_KEY, GEMINI_API_KEY: process.env.GEMINI_API_KEY, ...input.secrets };
+
+  const sdkEnv: Record<string, string | undefined> = {
+    ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+    GOOGLE_API_KEY: process.env.GOOGLE_API_KEY,
+    GEMINI_API_KEY: process.env.GEMINI_API_KEY,
+    ...input.secrets
+  };
+
   try {
-    if (provider === 'claude' || provider === 'claude-code') { await runClaudeQuery(input.prompt, input.sessionId, input, sdkEnv); }
-    else if (provider === 'gemini' || provider === 'gemini-cli') { await runGeminiQuery(input.prompt, input.sessionId, input, sdkEnv); }
-    else { throw new Error(`Unsupported agent/provider: ${provider}`); }
+    if (provider === 'claude' || provider === 'claude-code') {
+      await runClaudeQuery(input.prompt, input.sessionId, input, sdkEnv);
+    }
+    else if (provider === 'gemini' || provider === 'gemini-cli') {
+      await runGeminiQuery(input.prompt, input.sessionId, input, sdkEnv);
+    }
+    else {
+      throw new Error(`Unsupported agent/provider: ${provider}`);
+    }
     log('Query completed successfully.');
   } catch (err: any) {
-    log(`ERROR: Execution failed: ${err.message}`);
-    writeOutput({ status: 'error', error: err.message });
+    const errorMsg = err instanceof Error ? err.message : String(err);
+    log(`ERROR: Execution failed: ${errorMsg}`);
+    writeOutput({ status: 'error', error: errorMsg });
     process.exit(1);
   }
 }
 
-main().catch((err) => { log(`FATAL ERROR: ${err}`); process.exit(1); });
+main().catch((err: unknown) => { 
+  log(`FATAL ERROR: ${err instanceof Error ? err.message : String(err)}`); 
+  process.exit(1); 
+});
