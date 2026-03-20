@@ -124,7 +124,16 @@ async function runClaudeQuery(
 
     claude.stderr.on('data', (data: Buffer) => {
       const line = data.toString().trim();
-      if (line) log(`[claude-stderr] ${line}`);
+      if (line) {
+        log(`[claude-stderr] ${line}`);
+        // CIRCUIT BREAKER: Catch fatal API errors
+        if (/exhausted your capacity|429|quota limit/i.test(line)) {
+          log(`[SYSTEM_FATAL] Upstream API Error: Quota Exhausted`);
+          process.stdout.write(`\n[SYSTEM_FATAL] Upstream API Error: Quota Exhausted\n`);
+          claude.kill('SIGKILL');
+          process.exit(1);
+        }
+      }
     });
 
     claude.stdin.write(prompt + '\n');
@@ -166,7 +175,16 @@ async function runGeminiQuery(
     gemini.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
     gemini.stderr.on('data', (data: Buffer) => {
       const line = data.toString().trim();
-      if (line) log(`[gemini-stderr] ${line}`);
+      if (line) {
+        log(`[gemini-stderr] ${line}`);
+        // CIRCUIT BREAKER: Catch fatal API errors
+        if (/exhausted your capacity|429|quota limit/i.test(line)) {
+          log(`[SYSTEM_FATAL] Upstream API Error: Quota Exhausted`);
+          process.stdout.write(`\n[SYSTEM_FATAL] Upstream API Error: Quota Exhausted\n`);
+          gemini.kill('SIGKILL');
+          process.exit(1);
+        }
+      }
     });
 
     gemini.on('close', (code) => {

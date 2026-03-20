@@ -1,8 +1,7 @@
 FROM node:22-bullseye
 
 # Install Docker CLI and build tools
-RUN apt-get update && apt-get install -y docker.io python3 make g++ && \
-    rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y docker.io python3 make g++ curl && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 

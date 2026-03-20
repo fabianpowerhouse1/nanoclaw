@@ -27,6 +27,8 @@ import { RegisteredGroup } from './types.js';
 const OUTPUT_START_MARKER = '###NC_JSON_START###';
 const OUTPUT_END_MARKER = '###NC_JSON_END###';
 
+const SKILLS_DIR = '/home/ubuntu/powerhouse/skills';
+
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -47,6 +49,7 @@ export interface ContainerOutput {
   result: string | null;
   newSessionId?: string;
   error?: string;
+  isFatal?: boolean; // CIRCUIT BREAKER: Support fatal state
 }
 
 interface VolumeMount {
@@ -129,6 +132,13 @@ function buildVolumeMounts(
         containerPath: '/app/.agents',
         readonly: true
     });
+
+    // PLATFORM SKILL INTERFACE (V8.0)
+    mounts.push({
+        hostPath: SKILLS_DIR,
+        containerPath: '/app/skills',
+        readonly: true
+    });
   } else {
     const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}`;
     mounts.push({
@@ -166,6 +176,26 @@ function readSecrets(): Record<string, string> {
   const secrets = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
   if (SKILL_SERVICE_PSK) secrets.SKILL_SERVICE_PSK = SKILL_SERVICE_PSK;
   return secrets;
+}
+
+/**
+ * Dynamically read and aggregate skill definitions from the host
+ */
+function readSkills(): string {
+  let aggregated = '\n\n# [AVAILABLE SKILLS]\n';
+  try {
+    if (!fs.existsSync(SKILLS_DIR)) return '';
+    const skillFolders = fs.readdirSync(SKILLS_DIR);
+    for (const folder of skillFolders) {
+      const skillPath = path.join(SKILLS_DIR, folder, 'skill.md');
+      if (fs.existsSync(skillPath)) {
+        aggregated += fs.readFileSync(skillPath, 'utf8') + '\n---\n';
+      }
+    }
+  } catch (err) {
+    logger.warn('Failed to read platform skills directory');
+  }
+  return aggregated;
 }
 
 function buildContainerArgs(
@@ -306,6 +336,11 @@ export async function runContainerAgent(
   const logsDir = path.join(groupDir, 'logs');
   ensureWritableDir(logsDir);
 
+  // DYNAMIC PROMPT INJECTION (V8.0)
+  if (input.isIsolated) {
+      input.prompt += readSkills();
+  }
+
   return new Promise((resolve) => {
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
     onProcess(container, containerName);
@@ -405,8 +440,15 @@ export async function runContainerAgent(
         fs.writeFileSync(logFile, logLines.join('\n'));
         if (process.getuid?.() === 0) fs.chownSync(logFile, 1000, 1000);
 
+        // CIRCUIT BREAKER: Check for fatal signal in output
         if (code !== 0) {
-          resolve({ status: 'error', result: null, error: `Container exited with code ${code}` });
+          const isFatal = stdout.includes('[SYSTEM_FATAL]') || stderr.includes('[SYSTEM_FATAL]');
+          resolve({ 
+            status: 'error', 
+            result: null, 
+            error: isFatal ? 'Upstream API Exhaustion' : `Container exited with code ${code}`,
+            isFatal
+          });
           return;
         }
 

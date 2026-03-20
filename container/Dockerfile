@@ -59,18 +59,16 @@ COPY agent-runner/ ./
 RUN npm run build
 
 # Install pw-sync CLI (mount it from host orchestrator or copy during build)
-# For now, we will copy it if it exists in the build context, otherwise it will be skipped
-# Alternatively, we can mount it at runtime. 
-# Better: We'll add a placeholder that can be symlinked or replaced.
 RUN echo '#!/usr/bin/env node\nconsole.log("pw-sync placeholder")' > /usr/local/bin/pw-sync && chmod +x /usr/local/bin/pw-sync
 
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
 
-USER root
+# Set environment for global npm binaries
+ENV NPM_CONFIG_PREFIX=/root/.npm-global
+ENV PATH=$PATH:/root/.npm-global/bin
 
-# Set working directory to group workspace
-WORKDIR /workspace/group
+WORKDIR /workspace
 
 # Entry point reads JSON from stdin, outputs JSON to stdout
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

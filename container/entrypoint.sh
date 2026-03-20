@@ -1,13 +1,22 @@
 #!/bin/bash
 set -e
-# Navigate to app directory
+
+# THE ROOT TAKEOVER
+export HOME=/root
+export GEMINI_HOME=/root/.gemini
+# Ensure directory exists (will be used by bind mounts)
+mkdir -p $GEMINI_HOME
+
+# Navigate to app directory for setup check
 cd /app
-# Ensure dist directory exists in tmp
+
+# Ensure dist directory exists (legacy compatibility)
 mkdir -p /tmp/dist
-# Compile the agent-runner (if needed)
-[ -f /app/node_modules/.bin/tsc ] && /app/node_modules/.bin/tsc --outDir /tmp/dist 2>&1 >&2 || true
-# Link node_modules
 ln -sf /app/node_modules /tmp/dist/node_modules
+
+# ENFORCE CWD: Switch to workspace for agent execution
+cd /workspace
+
 # Execute the agent
 cat > /tmp/input.json
-node /tmp/dist/index.js < /tmp/input.json
+node /app/dist/index.js < /tmp/input.json
