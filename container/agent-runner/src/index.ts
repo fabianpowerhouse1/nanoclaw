@@ -110,6 +110,15 @@ async function runClaudeQuery(
       }
     });
 
+    // V0.6 GUILLOTINE: Configurable SDK Limit (V0.8)
+    const sdkTimeout = setTimeout(() => {
+        const timeoutVal = Number(process.env.LLM_TIMEOUT_MS) || 60000;
+        log(`[SYSTEM_FATAL] SDK Timeout: ${timeoutVal}ms limit reached`);
+        process.stdout.write(`\n[SYSTEM_FATAL] SDK Timeout: ${timeoutVal}ms limit reached\n`);
+        claude.kill('SIGKILL');
+        process.exit(1);
+    }, Number(process.env.LLM_TIMEOUT_MS) || 60000);
+
     let stdout = '';
     let lastAssistantUuid: string | undefined;
     let newSessionId: string | undefined;
@@ -140,6 +149,7 @@ async function runClaudeQuery(
     claude.stdin.end();
 
     claude.on('close', (code) => {
+      clearTimeout(sdkTimeout);
       if (code !== 0 && code !== 130) log(`Claude CLI exited with code ${code}`);
       writeOutput({ status: 'success', result: stdout.trim(), newSessionId: newSessionId || sessionId, lastAssistantUuid });
       resolve({ newSessionId, lastAssistantUuid, closedDuringQuery });
@@ -169,6 +179,15 @@ async function runGeminiQuery(
       }
     });
 
+    // V0.6 GUILLOTINE: Configurable SDK Limit (V0.8)
+    const sdkTimeout = setTimeout(() => {
+        const timeoutVal = Number(process.env.LLM_TIMEOUT_MS) || 60000;
+        log(`[SYSTEM_FATAL] SDK Timeout: ${timeoutVal}ms limit reached`);
+        process.stdout.write(`\n[SYSTEM_FATAL] SDK Timeout: ${timeoutVal}ms limit reached\n`);
+        gemini.kill('SIGKILL');
+        process.exit(1);
+    }, Number(process.env.LLM_TIMEOUT_MS) || 60000);
+
     let stdout = '';
     let closedDuringQuery = false;
 
@@ -188,6 +207,7 @@ async function runGeminiQuery(
     });
 
     gemini.on('close', (code) => {
+      clearTimeout(sdkTimeout);
       if (code !== 0) {
         log(`Gemini CLI exited with code ${code}`);
         writeOutput({ status: 'error', error: `Gemini CLI exited with code ${code}` });

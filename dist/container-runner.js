@@ -1,11 +1,11 @@
 import { exec, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { CONTAINER_IMAGE, CONTAINER_MAX_OUTPUT_SIZE, CONTAINER_TIMEOUT, DATA_DIR, IDLE_TIMEOUT, TIMEZONE, HOST_PROJECT_PATH, PROVIDER, GEMINI_SESSION_PATH, SKILL_SERVICE_URL, SKILL_SERVICE_PSK, } from './config.js';
+import { CONTAINER_IMAGE, CONTAINER_MAX_OUTPUT_SIZE, DATA_DIR, TIMEZONE, HOST_PROJECT_PATH, PROVIDER, GEMINI_SESSION_PATH, SKILL_SERVICE_URL, SKILL_SERVICE_PSK, } from './config.js';
 import { readEnvFile } from './env.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
-import { CONTAINER_RUNTIME_BIN, readonlyMountArgs, stopContainer } from './container-runtime.js';
+import { CONTAINER_RUNTIME_BIN, readonlyMountArgs } from './container-runtime.js';
 // Sentinel markers for robust output parsing (must match agent-runner)
 const OUTPUT_START_MARKER = '###NC_JSON_START###';
 const OUTPUT_END_MARKER = '###NC_JSON_END###';
@@ -118,25 +118,22 @@ function readSecrets() {
     return secrets;
 }
 /**
- * Dynamically read and aggregate skill definitions from the host
+ * Dynamically read available skill names and inject JIT instructions
+ * Strategy B (Lazy-Loading) implemented in V0.7
  */
 function readSkills() {
-    let aggregated = '\n\n# [AVAILABLE SKILLS]\n';
     try {
         if (!fs.existsSync(SKILLS_DIR))
             return '';
-        const skillFolders = fs.readdirSync(SKILLS_DIR);
-        for (const folder of skillFolders) {
-            const skillPath = path.join(SKILLS_DIR, folder, 'skill.md');
-            if (fs.existsSync(skillPath)) {
-                aggregated += fs.readFileSync(skillPath, 'utf8') + '\n---\n';
-            }
-        }
+        const skillFolders = fs.readdirSync(SKILLS_DIR).filter(f => fs.statSync(path.join(SKILLS_DIR, f)).isDirectory());
+        if (skillFolders.length === 0)
+            return '';
+        return `\n\nSystem Note: Specialized tools are mounted in /app/skills/. Available tools: [${skillFolders.join(', ')}]. If your task requires one of these tools, you MUST first read its documentation at /app/skills/<tool_name>/skill.md using your file reading tool.\n`;
     }
     catch (err) {
         logger.warn('Failed to read platform skills directory');
+        return '';
     }
-    return aggregated;
 }
 function buildContainerArgs(mounts, containerName, input, githubToken) {
     const args = ['run', '-i', '--name', containerName];
@@ -159,6 +156,7 @@ function buildContainerArgs(mounts, containerName, input, githubToken) {
         args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=/workspace/active_sessions/pilot-alpha_pm_prompt.txt`);
     }
     args.push('-e', `TZ=${TIMEZONE}`);
+    args.push('-e', `LLM_TIMEOUT_MS=${process.env.LLM_TIMEOUT_MS || '60000'}`);
     if (SKILL_SERVICE_URL) {
         args.push('-e', `SKILL_SERVICE_URL=${SKILL_SERVICE_URL}`);
         args.push('--network', 'infra_core-net');
@@ -331,30 +329,33 @@ export async function runContainerAgent(group, input, onProcess, onOutput) {
             }
         });
         let timedOut = false;
-        const configTimeout = group.containerConfig?.timeout || CONTAINER_TIMEOUT;
-        const timeoutMs = Math.max(configTimeout, IDLE_TIMEOUT + 30_000);
+        // V0.6 GUILLOTINE: Configurable TTL (V0.8)
+        const timeoutMs = Number(process.env.CONTAINER_TTL_MS) || 120000;
         const killOnTimeout = () => {
             timedOut = true;
-            exec(stopContainer(containerName), { timeout: 15000 }, (err) => {
+            // Forceful stop with 1s grace
+            exec(`docker stop -t 1 ${containerName}`, { timeout: 15000 }, (err) => {
                 if (err)
                     container.kill('SIGKILL');
             });
         };
         let timeout = setTimeout(killOnTimeout, timeoutMs);
         const resetTimeout = () => {
-            clearTimeout(timeout);
-            timeout = setTimeout(killOnTimeout, timeoutMs);
+            // CLEAR: Circuit Breaker reset must respect the hard 90s guillotine.
+            // We do not extend the physical container TTL.
         };
         container.on('close', (code) => {
             clearTimeout(timeout);
             const duration = Date.now() - startTime;
             try {
                 if (timedOut) {
-                    if (hadStreamingOutput) {
-                        outputChain.then(() => resolve({ status: 'success', result: null, newSessionId }));
-                        return;
-                    }
-                    resolve({ status: 'error', result: null, error: `Container timed out after ${configTimeout}ms` });
+                    // CIRCUIT BREAKER SIGNAL: Injection into failure payload
+                    resolve({
+                        status: 'error',
+                        result: null,
+                        error: `[SYSTEM_FATAL] Execution Timeout: ${Number(process.env.CONTAINER_TTL_MS) || 120000}ms limit reached`,
+                        isFatal: true
+                    });
                     return;
                 }
                 const logFile = path.join(logsDir, `container-${new Date().toISOString().replace(/[:.]/g, '-')}.log`);
