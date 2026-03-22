@@ -159,6 +159,30 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
 
   if (missedMessages.length === 0) return true;
 
+  // Handle "server time" command
+  const SERVER_TIME_PATTERN = new RegExp(
+    `^@${ASSISTANT_NAME}\\s+server\\s+time\\b`,
+    'i',
+  );
+  const timeRequest = missedMessages.find((m) =>
+    SERVER_TIME_PATTERN.test(m.content.trim()),
+  );
+
+  if (timeRequest) {
+    const now = new Date();
+    const timeStr = now.toLocaleString();
+    logger.info({ chatJid, time: timeStr }, 'Handling server time command');
+    await channel.sendMessage(chatJid, `Current server time: ${timeStr}`);
+
+    // Mark messages handled
+    lastAgentTimestamp[chatJid] =
+      missedMessages[missedMessages.length - 1].timestamp;
+    saveState();
+
+    // If it was just the time request, we're done.
+    if (missedMessages.length === 1) return true;
+  }
+
   // For non-main groups, check if trigger is required and present
   if (!isMainGroup && group.requiresTrigger !== false) {
     const allowlistCfg = loadSenderAllowlist();
