@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import * as fs from 'fs';
 import { readFile } from 'fs/promises';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 
 // --- TYPES (Matching nanoclaw/src/types.ts and container-runner.ts) ---
 
@@ -338,7 +339,9 @@ async function main() {
   }
 }
 
-main().catch((err: unknown) => { 
-  log(`FATAL ERROR: ${err instanceof Error ? err.message : String(err)}`); 
-  process.exit(1); 
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((err: unknown) => { 
+    log(`FATAL ERROR: ${err instanceof Error ? err.message : String(err)}`); 
+    process.exit(1); 
+  });
+}

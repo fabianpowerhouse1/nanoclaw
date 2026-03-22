@@ -29,6 +29,15 @@ const OUTPUT_END_MARKER = '###NC_JSON_END###';
 
 const SKILLS_DIR = '/home/ubuntu/powerhouse/skills';
 
+// Paths INSIDE the bot container (where they are mounted)
+const AGENT_INIT_CONTAINER_PATH = '/app/scripts/agent-init.sh';
+const MOCK_PASSWD_LIB_CONTAINER_PATH = '/app/scripts/libmockpasswd.so';
+
+// Paths on the HOST (needed for Docker mounts)
+const AGENT_INIT_HOST_PATH = '/home/ubuntu/powerhouse/orchestrator/scripts/agent-init.sh';
+const MOCK_PASSWD_LIB_HOST_PATH = '/home/ubuntu/powerhouse/orchestrator/scripts/libmockpasswd.so';
+const PERSONA_DIR_HOST_PATH = '/home/ubuntu/powerhouse/orchestrator/.agents/personas';
+
 export interface ContainerInput {
   prompt: string;
   sessionId?: string;
@@ -106,9 +115,10 @@ function buildVolumeMounts(
   const mounts: VolumeMount[] = [];
   
   if (input.isIsolated && ephemeralHomePath) {
+    // Mount ephemeral home to /tmp/home inside the container to avoid /root shadowing
     mounts.push({
       hostPath: toHostPath(ephemeralHomePath),
-      containerPath: '/root',
+      containerPath: '/tmp/home',
       readonly: false,
     });
   } else if (PROVIDER === 'gemini-cli' && fs.existsSync(GEMINI_SESSION_PATH)) {
@@ -116,6 +126,11 @@ function buildVolumeMounts(
       hostPath: "/home/ubuntu/.gemini",
       containerPath: '/root/.gemini',
       readonly: false,
+    });
+    mounts.push({
+        hostPath: "/home/ubuntu/.gemini",
+        containerPath: '/home/node/.gemini',
+        readonly: false,
     });
   }
 
@@ -169,6 +184,24 @@ function buildVolumeMounts(
     });
   }
 
+  // Mandatory V6 Orchestration Bridge
+  if (fs.existsSync(AGENT_INIT_CONTAINER_PATH) || fs.existsSync(AGENT_INIT_HOST_PATH)) {
+      mounts.push({
+          hostPath: AGENT_INIT_HOST_PATH,
+          containerPath: '/usr/local/bin/agent-init.sh',
+          readonly: true
+      });
+  }
+
+  // Infrastructure Support: Passwd Mock
+  if (fs.existsSync(MOCK_PASSWD_LIB_CONTAINER_PATH) || fs.existsSync(MOCK_PASSWD_LIB_HOST_PATH)) {
+      mounts.push({
+          hostPath: MOCK_PASSWD_LIB_HOST_PATH,
+          containerPath: '/usr/local/lib/libmockpasswd.so',
+          readonly: true
+      });
+  }
+
   return mounts;
 }
 
@@ -197,24 +230,107 @@ function readSkills(): string {
   }
 }
 
+/**
+ * Deterministic Persona Resolution (V1.3)
+ * Maps strict aliases to persona prompt files.
+ */
+export function resolvePersonaPath(personaOverride?: string): string {
+    const DEFAULT_PERSONA = 'pm.md';
+    
+    if (!personaOverride) {
+        return '/workspace/active_sessions/pilot-alpha_pm_prompt.txt';
+    }
+
+    const PERSONA_MAP: Record<string, string> = {
+        // PM / Discovery
+        'pm': 'pm.md',
+        'product': 'pm.md',
+        'manager': 'pm.md',
+        'lead': 'pm.md',
+        
+        // Peer PM / Audit
+        'peer-pm': 'peer_pm.md',
+        'peer_pm': 'peer_pm.md',
+        'pm-audit': 'peer_pm.md',
+        'bar-raiser': 'peer_pm.md',
+        
+        // Architect / Design
+        'architect': 'architect.md',
+        'arch': 'architect.md',
+        'principal': 'architect.md',
+        
+        // Peer Architect / Audit
+        'peer-architect': 'peer-architect.md',
+        'peer_architect': 'peer-architect.md',
+        'arch-audit': 'peer-architect.md',
+        
+        // Developer / Implementation
+        'dev': 'tdd-coder.md',
+        'developer': 'tdd-coder.md',
+        'coder': 'tdd-coder.md',
+        'engineer': 'tdd-coder.md',
+        'implementation': 'tdd-coder.md',
+        
+        // QA / Triage
+        'qa': 'qa-triage.md',
+        'triage': 'qa-triage.md',
+        'tester': 'qa-triage.md',
+        'bug-hunter': 'qa-triage.md',
+        
+        // SRE / Hardening
+        'sre': 'sre.md',
+        'ops': 'sre.md',
+        'reliability': 'sre.md',
+        'hardening': 'sre.md',
+        
+        // Curator / Documentation
+        'curator': 'context-curator.md',
+        'documentation': 'context-curator.md',
+        'docs': 'context-curator.md',
+        'finalizer': 'context-curator.md'
+    };
+
+    const normalized = personaOverride.trim().toLowerCase();
+    const personaFile = PERSONA_MAP[normalized];
+
+    if (personaFile) {
+        const hostPath = path.join(PERSONA_DIR_HOST_PATH, personaFile);
+        if (fs.existsSync(hostPath)) {
+            return `/app/.agents/personas/${personaFile}`;
+        }
+        logger.warn({ personaOverride, personaFile }, 'Persona file mapped but not found on host. Falling back.');
+    } else {
+        logger.warn({ personaOverride }, 'Unknown persona override requested. Falling back to PM.');
+    }
+    
+    return `/app/.agents/personas/${DEFAULT_PERSONA}`;
+}
+
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   input?: ContainerInput, githubToken?: string,
 ): string[] {
   const args: string[] = ['run', '-i', '--name', containerName];
+  
+  // V6 ENTRYPOINT OVERRIDE
+  args.push('--entrypoint', '/usr/local/bin/agent-init.sh');
+
   args.push('-e', 'CI=true');
   args.push('-e', 'NONINTERACTIVE=1');
+  
+  if (process.env.POWERHOUSE_DEBUG === 'true') {
+      args.push('-e', 'POWERHOUSE_DEBUG=true');
+  }
+
   if (githubToken) {
     args.push('-e', `GH_TOKEN=${githubToken}`);
     args.push('-e', `GITHUB_TOKEN=${githubToken}`);
   }
   
+  const personaPath = resolvePersonaPath(input?.personaOverride);
+  
   if (input?.isIsolated && input?.personaOverride) {
-      const persona = input.personaOverride.trim().toLowerCase().replace(/ /g, '-');
-      let personaFile = `${persona}.md`;
-      if (persona === 'peer-pm') personaFile = 'peer_pm.md';
-      const personaPath = `/app/.agents/personas/${personaFile}`;
       args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=${personaPath}`);
       args.push('-e', 'ISOLATED_WORKSPACE=true');
   } else {
@@ -222,7 +338,8 @@ function buildContainerArgs(
   }
 
   args.push('-e', `TZ=${TIMEZONE}`);
-  args.push('-e', `LLM_TIMEOUT_MS=${process.env.LLM_TIMEOUT_MS || '60000'}`);
+  args.push('-e', `LLM_TIMEOUT_MS=${process.env.LLM_TIMEOUT_MS || '600000'}`);
+  args.push('-e', `LLM_MODEL=${process.env.LLM_MODEL || ''}`);
   if (SKILL_SERVICE_URL) {
     args.push('-e', `SKILL_SERVICE_URL=${SKILL_SERVICE_URL}`);
     args.push('--network', 'infra_core-net'); 
@@ -232,14 +349,21 @@ function buildContainerArgs(
   const hostUid = process.getuid?.();
   const hostGid = process.getgid?.();
 
+  // ENV INJECTION FOR AGENT-INIT.SH
+  args.push('-e', `ACTIVE_WORKSPACE_PATH=${input?.isIsolated ? '/workspace' : '/workspace/group'}`);
+  args.push('-e', `INJECTED_PROMPT_PATH=${personaPath}`);
+
   if (input?.isIsolated) {
       args.push("--workdir", "/workspace");
       args.push('--cap-drop=ALL');
       args.push('--security-opt', 'no-new-privileges');
-      args.push('-e', 'HOME=/root');
+      // V1.3 FIX: Always use /tmp for HOME in isolated mode to avoid "Neutered Root" permission deadlocks in /root
+      args.push('-e', 'HOME=/tmp');
   } else if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
     args.push('--user', `${hostUid}:${hostGid}`);
-    args.push('-e', 'HOME=/home/node');
+    args.push('-e', 'HOME=/tmp');
+  } else {
+    args.push('-e', `HOME=${hostUid === 0 ? '/tmp' : '/tmp'}`);
   }
 
   for (const mount of mounts) {
@@ -263,6 +387,32 @@ function sanitizeContainerArgs(args: string[]): string[] {
   });
 }
 
+function getGitHubToken(): string | undefined {
+    let token: string | undefined;
+    
+    try {
+        if (fs.existsSync('/run/secrets/github_token')) {
+            token = fs.readFileSync('/run/secrets/github_token', 'utf8').trim();
+        }
+    } catch (e) {}
+
+    if (token) return token;
+
+    token = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT || process.env.GH_TOKEN;
+    if (token) return token;
+
+    try {
+        const secretPath = '/home/ubuntu/.secrets/github.env';
+        if (fs.existsSync(secretPath)) {
+            const content = fs.readFileSync(secretPath, 'utf8');
+            const match = content.match(/GITHUB_PAT=([^\s]+)/) || content.match(/GITHUB_TOKEN=([^\s]+)/);
+            if (match) token = match[1];
+        }
+    } catch (e) {}
+
+    return token;
+}
+
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -273,19 +423,7 @@ export async function runContainerAgent(
   const groupDir = resolveGroupFolderPath(group.folder);
   ensureWritableDir(groupDir);
 
-  let githubToken: string | undefined;
-  try {
-    if (fs.existsSync('/run/secrets/github_token')) {
-      githubToken = fs.readFileSync('/run/secrets/github_token', 'utf8').trim();
-    }
-  } catch (e) {
-    logger.warn('Failed to read github_token secret');
-  }
-
-  // Graceful Degradation: Fallback to process.env.GITHUB_TOKEN
-  if (!githubToken && process.env.GITHUB_TOKEN) {
-    githubToken = process.env.GITHUB_TOKEN;
-  }
+  const githubToken = getGitHubToken();
 
   let ephemeralHomePath: string | undefined;
   if (input.isIsolated) {
@@ -315,6 +453,9 @@ export async function runContainerAgent(
     
     const gitConfig = '[user]\n  name = Powerhouse Agent\n  email = ai@powerhouse.local\n[core]\n  sshCommand = ssh -o StrictHostKeyChecking=no -i /root/.ssh/id_rsa';
     fs.writeFileSync(path.join(ephemeralHomePath, '.gitconfig'), gitConfig);
+    
+    // V1.3 FIX: Ensure the ephemeral directory is writable by the agent (UID 1001 or restricted root)
+    fs.chmodSync(ephemeralHomePath, 0o777);
     } catch (err: any) {
       logger.warn({ err: err.message }, 'Secure Secrets Proxy: Partial seeding failure, continuing without full credentials');
     }
@@ -325,7 +466,6 @@ export async function runContainerAgent(
   const containerName = `nanoclaw-agent-${safeName}-${Date.now()}`;
   const containerArgs = buildContainerArgs(mounts, containerName, input, githubToken);
   
-  // Telemetry Redaction: Mask tokens if logging args
   logger.info({ 
     group: group.name, 
     containerName, 
@@ -336,7 +476,6 @@ export async function runContainerAgent(
   const logsDir = path.join(groupDir, 'logs');
   ensureWritableDir(logsDir);
 
-  // DYNAMIC PROMPT INJECTION (V8.0)
   if (input.isIsolated) {
       input.prompt += readSkills();
   }
@@ -407,32 +546,26 @@ export async function runContainerAgent(
     });
 
     let timedOut = false;
-    // V0.6 GUILLOTINE: Configurable TTL (V0.8)
-    const timeoutMs = Number(process.env.CONTAINER_TTL_MS) || 120000;
+    const timeoutMs = Number(process.env.CONTAINER_TTL_MS) || 600000;
     const killOnTimeout = () => {
       timedOut = true;
-      // Forceful stop with 1s grace
       exec(`docker stop -t 1 ${containerName}`, { timeout: 15000 }, (err) => {
         if (err) container.kill('SIGKILL');
       });
     };
     let timeout = setTimeout(killOnTimeout, timeoutMs);
-    const resetTimeout = () => {
-      // CLEAR: Circuit Breaker reset must respect the hard 90s guillotine.
-      // We do not extend the physical container TTL.
-    };
+    const resetTimeout = () => {};
 
     container.on('close', (code) => {
       clearTimeout(timeout);
       const duration = Date.now() - startTime;
 
       try {
-        if (timedOut) {
-          // CIRCUIT BREAKER SIGNAL: Injection into failure payload
+        if (timedOut && !hadStreamingOutput) {
           resolve({ 
             status: 'error', 
             result: null, 
-            error: `[SYSTEM_FATAL] Execution Timeout: ${Number(process.env.CONTAINER_TTL_MS) || 120000}ms limit reached`,
+            error: `[SYSTEM_FATAL] Execution Timeout: ${Number(process.env.CONTAINER_TTL_MS) || 600000}ms limit reached`,
             isFatal: true
           });
           return;
@@ -443,8 +576,7 @@ export async function runContainerAgent(
         fs.writeFileSync(logFile, logLines.join('\n'));
         if (process.getuid?.() === 0) fs.chownSync(logFile, 1000, 1000);
 
-        // CIRCUIT BREAKER: Check for fatal signal in output
-        if (code !== 0) {
+        if (code !== 0 && !hadStreamingOutput) {
           const isFatal = stdout.includes('[SYSTEM_FATAL]') || stderr.includes('[SYSTEM_FATAL]');
           resolve({ 
             status: 'error', 
