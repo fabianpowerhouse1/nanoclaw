@@ -57,14 +57,22 @@ const OUTPUT_END_MARKER = '###NC_JSON_END###';
 
 // --- UTILS ---
 
+export function redactCredentials(text: string): string {
+  // V1.0 Telemetry Sanitizer: Redact sensitive tokens and secrets
+  return text.replace(/(access_token|refresh_token|id_token|client_secret|_clientSecret)(["']?\s*[:=]\s*["']?)([^"'\s,]+)(["']?)/gi, (match, key, separator, value, endQuote) => {
+    return `${key}${separator}[REDACTED_BY_POWERHOUSE]${endQuote}`;
+  });
+}
+
 function log(msg: string) {
   const timestamp = new Date().toISOString();
-  console.error(`[${timestamp}] ${msg}`);
+  console.error(`[${timestamp}] ${redactCredentials(msg)}`);
 }
 
 function writeOutput(output: ContainerOutput) {
   // Write to stdout with markers so the host can capture it reliably
-  process.stdout.write(OUTPUT_START_MARKER + JSON.stringify(output) + OUTPUT_END_MARKER + '\n');
+  const sanitizedOutput = JSON.parse(redactCredentials(JSON.stringify(output)));
+  process.stdout.write(OUTPUT_START_MARKER + JSON.stringify(sanitizedOutput) + OUTPUT_END_MARKER + '\n');
 }
 
 /**
@@ -82,7 +90,7 @@ async function readStdin(): Promise<string> {
     });
     // Safety timeout for interactive shells
     if (process.stdin.isTTY) {
-      setTimeout(() => resolve(data), 100);
+      setTimeout(() => resolve(data), 1000); // 1s for interactive
     }
   });
 }
@@ -99,6 +107,13 @@ async function runClaudeQuery(
 
   return new Promise((resolve) => {
     const args = sessionId ? ['--session', sessionId] : [];
+    
+    const isDebug = process.env.POWERHOUSE_DEBUG === 'true';
+    if (isDebug) {
+        log(`[DEBUG] Claude Debug Mode enabled.`);
+        args.push('--verbose');
+    }
+
     const claude = spawn('claude', args, {
       env: {
         ...process.env,
@@ -112,12 +127,12 @@ async function runClaudeQuery(
 
     // V0.6 GUILLOTINE: Configurable SDK Limit (V0.8)
     const sdkTimeout = setTimeout(() => {
-        const timeoutVal = Number(process.env.LLM_TIMEOUT_MS) || 60000;
+        const timeoutVal = Number(process.env.LLM_TIMEOUT_MS) || 600000;
         log(`[SYSTEM_FATAL] SDK Timeout: ${timeoutVal}ms limit reached`);
         process.stdout.write(`\n[SYSTEM_FATAL] SDK Timeout: ${timeoutVal}ms limit reached\n`);
         claude.kill('SIGKILL');
         process.exit(1);
-    }, Number(process.env.LLM_TIMEOUT_MS) || 60000);
+    }, Number(process.env.LLM_TIMEOUT_MS) || 600000);
 
     let stdout = '';
     let lastAssistantUuid: string | undefined;
@@ -125,22 +140,23 @@ async function runClaudeQuery(
     let closedDuringQuery = false;
 
     claude.stdout.on('data', (data: Buffer) => {
-      const chunk = data.toString();
+      const chunk = redactCredentials(data.toString());
       stdout += chunk;
       const sessionMatch = chunk.match(/Session ID: ([a-zA-Z0-9-]+)/);
       if (sessionMatch) newSessionId = sessionMatch[1];
+      
+      if (isDebug) {
+          log(`[claude-stdout] ${chunk.trim()}`);
+      }
     });
 
     claude.stderr.on('data', (data: Buffer) => {
-      const line = data.toString().trim();
+      const line = redactCredentials(data.toString().trim());
       if (line) {
         log(`[claude-stderr] ${line}`);
-        // CIRCUIT BREAKER: Catch fatal API errors
+        // V0.9 SMART BREAKER: Demote transient API errors to warnings
         if (/exhausted your capacity|429|quota limit/i.test(line)) {
-          log(`[SYSTEM_FATAL] Upstream API Error: Quota Exhausted`);
-          process.stdout.write(`\n[SYSTEM_FATAL] Upstream API Error: Quota Exhausted\n`);
-          claude.kill('SIGKILL');
-          process.exit(1);
+          log(`[WARN] Transient API Limit hit. Deferring to native CLI retry logic...`);
         }
       }
     });
@@ -150,7 +166,11 @@ async function runClaudeQuery(
 
     claude.on('close', (code) => {
       clearTimeout(sdkTimeout);
-      if (code !== 0 && code !== 130) log(`Claude CLI exited with code ${code}`);
+      if (code !== 0 && code !== 130) {
+        log(`[SYSTEM_FATAL] Upstream API Error: CLI Terminated unexpectedly (Code: ${code})`);
+        process.stdout.write(`\n[SYSTEM_FATAL] Upstream API Error: CLI Terminated unexpectedly (Code: ${code})\n`);
+        process.exit(1);
+      }
       writeOutput({ status: 'success', result: stdout.trim(), newSessionId: newSessionId || sessionId, lastAssistantUuid });
       resolve({ newSessionId, lastAssistantUuid, closedDuringQuery });
     });
@@ -167,11 +187,26 @@ async function runGeminiQuery(
 ): Promise<{ newSessionId?: string; lastAssistantUuid?: string; closedDuringQuery: boolean }> {
   log(`Running Gemini query (session ID: ${sessionId || 'new'})`);
 
+  const isDebug = process.env.POWERHOUSE_DEBUG === 'true';
+  
   return new Promise((resolve) => {
-    const gemini = spawn('gemini', ['-p', prompt, '--approval-mode', 'yolo'], {
+    // V0.9.2 TELEMETRY SHATTER: Enable --debug and respect LLM_MODEL env
+    const geminiArgs = [
+      ...(isDebug ? ['--debug', '--output-format', 'stream-json'] : ['--debug']), 
+      ...(process.env.LLM_MODEL ? ['--model', process.env.LLM_MODEL] : []),
+      '-p', prompt,
+      '--approval-mode', 'yolo'
+    ];
+
+    if (isDebug) {
+        log(`[DEBUG] Gemini Telemetry Mode enabled (POWERHOUSE_DEBUG=true).`);
+    }
+
+    const gemini = spawn('gemini', geminiArgs, {
       env: {
         ...process.env,
         ...sdkEnv,
+        GEMINI_TELEMETRY_ENABLED: isDebug ? 'true' : process.env.GEMINI_TELEMETRY_ENABLED,
         HOME: '/root',
         USER: 'root',
         TERM: 'dumb',
@@ -181,27 +216,32 @@ async function runGeminiQuery(
 
     // V0.6 GUILLOTINE: Configurable SDK Limit (V0.8)
     const sdkTimeout = setTimeout(() => {
-        const timeoutVal = Number(process.env.LLM_TIMEOUT_MS) || 60000;
+        const timeoutVal = Number(process.env.LLM_TIMEOUT_MS) || 600000;
         log(`[SYSTEM_FATAL] SDK Timeout: ${timeoutVal}ms limit reached`);
         process.stdout.write(`\n[SYSTEM_FATAL] SDK Timeout: ${timeoutVal}ms limit reached\n`);
         gemini.kill('SIGKILL');
         process.exit(1);
-    }, Number(process.env.LLM_TIMEOUT_MS) || 60000);
+    }, Number(process.env.LLM_TIMEOUT_MS) || 600000);
 
     let stdout = '';
     let closedDuringQuery = false;
 
-    gemini.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
+    gemini.stdout.on('data', (data: Buffer) => { 
+      const chunk = redactCredentials(data.toString());
+      stdout += chunk; 
+      // V0.9.2: Real-time stdout telemetry for debugging silent hangs
+      if (isDebug || chunk.includes('###NC_JSON')) {
+          log(`[gemini-stdout] ${chunk.trim()}`);
+      }
+    });
+
     gemini.stderr.on('data', (data: Buffer) => {
-      const line = data.toString().trim();
+      const line = redactCredentials(data.toString().trim());
       if (line) {
         log(`[gemini-stderr] ${line}`);
-        // CIRCUIT BREAKER: Catch fatal API errors
+        // V0.9 SMART BREAKER: Demote transient API errors to warnings
         if (/exhausted your capacity|429|quota limit/i.test(line)) {
-          log(`[SYSTEM_FATAL] Upstream API Error: Quota Exhausted`);
-          process.stdout.write(`\n[SYSTEM_FATAL] Upstream API Error: Quota Exhausted\n`);
-          gemini.kill('SIGKILL');
-          process.exit(1);
+          log(`[WARN] Transient API Limit hit. Deferring to native CLI retry logic...`);
         }
       }
     });
@@ -209,10 +249,9 @@ async function runGeminiQuery(
     gemini.on('close', (code) => {
       clearTimeout(sdkTimeout);
       if (code !== 0) {
-        log(`Gemini CLI exited with code ${code}`);
-        writeOutput({ status: 'error', error: `Gemini CLI exited with code ${code}` });
-        resolve({ closedDuringQuery });
-        return;
+        log(`[SYSTEM_FATAL] Upstream API Error: CLI Terminated unexpectedly (Code: ${code})`);
+        writeOutput({ status: 'error', error: `Gemini CLI terminated unexpectedly (Code: ${code})` });
+        process.exit(1);
       }
       const pseudoSessionId = sessionId || `gemini-${containerInput.chatJid}`;
       writeOutput({ status: 'success', result: stdout.trim(), newSessionId: pseudoSessionId });
@@ -251,7 +290,9 @@ async function main() {
     try {
       log(`Injecting system prompt from: ${systemPromptPath}`);
       const systemPrompt = await readFile(systemPromptPath, 'utf8');
-      log(`=== INJECTED SYSTEM PROMPT ===\n${systemPrompt}`);
+      if (process.env.POWERHOUSE_DEBUG === 'true') {
+          log(`=== INJECTED SYSTEM PROMPT ===\n${systemPrompt}`);
+      }
       input.prompt = `${systemPrompt}\n\n--- SYSTEM INSTRUCTIONS ---\n\n${input.prompt}`;
     } catch (err: any) { 
       log(`Warning: Failed to read system prompt at ${systemPromptPath}: ${err.message}`); 
