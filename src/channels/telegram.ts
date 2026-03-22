@@ -13,6 +13,7 @@ import {
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
+  NewMessage,
 } from '../types.js';
 import { storeMessageDirect, storeChatMetadata } from "../db.js";
 
@@ -60,6 +61,8 @@ export class TelegramChannel implements Channel {
     });
 
     this.bot.on('message:text', async (ctx) => {
+      logger.info({ chat: ctx.chat.id, from: ctx.from?.id, text: ctx.message.text }, 'RAW INBOUND TELEGRAM MESSAGE');
+      
       // Skip commands (except our experimental isolation command)
       const isIsolationCommand = ctx.message.text.startsWith('/v6_isolate');
       if (ctx.message.text.startsWith('/') && !isIsolationCommand) return;
@@ -198,45 +201,39 @@ export class TelegramChannel implements Channel {
       this.opts.onMessage(chatJid, {
         id: ctx.message.message_id.toString(),
         chat_jid: chatJid,
-        sender: ctx.from?.id?.toString() || '',
+        sender: senderId,
         sender_name: senderName,
-        content: `${placeholder}${caption}`,
+        content: `[${placeholder}]${caption}`,
         timestamp,
         is_from_me: false,
       });
     };
 
-    this.bot.on('message:photo', (ctx) => storeNonText(ctx, '[Photo]'));
-    this.bot.on('message:video', (ctx) => storeNonText(ctx, '[Video]'));
-    this.bot.on('message:voice', (ctx) =>
-      storeNonText(ctx, '[Voice message]'),
-    );
-    this.bot.on('message:audio', (ctx) => storeNonText(ctx, '[Audio]'));
+    this.bot.on('message:photo', (ctx) => storeNonText(ctx, 'Photo'));
+    this.bot.on('message:video', (ctx) => storeNonText(ctx, 'Video'));
+    this.bot.on('message:voice', (ctx) => storeNonText(ctx, 'Voice Message'));
+    this.bot.on('message:audio', (ctx) => storeNonText(ctx, 'Audio'));
     this.bot.on('message:document', (ctx) => {
-      const name = ctx.message.document?.file_name || 'file';
-      storeNonText(ctx, `[Document: ${name}]`);
+      const fileName = ctx.message.document.file_name || 'File';
+      storeNonText(ctx, `Document: ${fileName}`);
     });
-    this.bot.on('message:sticker', (ctx) => {
-      const emoji = ctx.message.sticker?.emoji || '';
-      storeNonText(ctx, `[Sticker ${emoji}]`);
-    });
-    this.bot.on('message:location', (ctx) => storeNonText(ctx, '[Location]'));
-    this.bot.on('message:contact', (ctx) => storeNonText(ctx, '[Contact]'));
+    this.bot.on('message:sticker', (ctx) => storeNonText(ctx, `Sticker: ${ctx.message.sticker.emoji || ''}`));
+    this.bot.on('message:location', (ctx) => storeNonText(ctx, 'Location'));
+    this.bot.on('message:contact', (ctx) => storeNonText(ctx, 'Contact'));
 
     // Handle errors gracefully
     this.bot.catch((err) => {
-      logger.error({ err: err.message }, 'Telegram bot error');
+        logger.error({ err: err.message }, 'Telegram bot error');
     });
 
-    // Start polling
-    return new Promise<void>((resolve) => {
-            this.bot!.start({
-        onStart: (botInfo) => {
-          logger.info({ username: botInfo.username, id: botInfo.id }, "Telegram bot connected");
-          console.log("Telegram bot connected: @" + botInfo.username);
-          resolve();
-        },
-      });
+    return new Promise((resolve) => {
+        this.bot!.start({
+          onStart: (info) => {
+            logger.info({ username: info.username, id: info.id }, "Telegram bot connected");
+            console.log("Telegram bot connected: @" + info.username);
+            resolve();
+          }
+        });
     });
   }
 
@@ -245,27 +242,19 @@ export class TelegramChannel implements Channel {
       logger.warn('Telegram bot not initialized');
       return;
     }
-
     try {
       const numericId = jid.replace(/^tg:/, '');
-
-      // Telegram has a 4096 character limit per message
       const MAX_LENGTH = 4096;
       if (text.length <= MAX_LENGTH) {
         await this.bot.api.sendMessage(numericId, text);
       } else {
         for (let i = 0; i < text.length; i += MAX_LENGTH) {
-          await this.bot.api.sendMessage(
-            numericId,
-            text.slice(i, i + MAX_LENGTH),
-          );
+          await this.bot.api.sendMessage(numericId, text.slice(i, i + MAX_LENGTH));
         }
       }
       logger.info({ jid, length: text.length }, 'Telegram message sent');
-      
       const now = new Date().toISOString();
       storeChatMetadata(jid, now, undefined, 'telegram', jid.includes(':'));
-
       storeMessageDirect({
         id: 'out-' + Date.now(),
         chat_jid: jid,
@@ -291,7 +280,7 @@ export class TelegramChannel implements Channel {
 
   async disconnect(): Promise<void> {
     if (this.bot) {
-      this.bot.stop();
+      await this.bot.stop();
       this.bot = null;
       logger.info('Telegram bot stopped');
     }

@@ -373,6 +373,8 @@ async function startSessionMonitor() {
   // ... (omitted for brevity)
 }
 
+const BOOT_TIMESTAMP = new Date().toISOString();
+
 function startInternalBridge(): void {
   const app = express();
   app.use(express.json());
@@ -390,7 +392,7 @@ function startInternalBridge(): void {
         });
       
       // Immediate ACK to the heartbeat caller
-      res.json({ status: "ok" });
+      res.json({ status: "ok", boot_timestamp: BOOT_TIMESTAMP });
     } catch (err: any) {
       res.status(500).json({ status: 'error', error: err.message });
     }

@@ -281,6 +281,7 @@ function ensureContainerSystemRunning() {
 async function startSessionMonitor() {
     // ... (omitted for brevity)
 }
+const BOOT_TIMESTAMP = new Date().toISOString();
 function startInternalBridge() {
     const app = express();
     app.use(express.json());
@@ -297,7 +298,7 @@ function startInternalBridge() {
                 logger.error({ err: err.message }, 'Health check agent background failure');
             });
             // Immediate ACK to the heartbeat caller
-            res.json({ status: "ok" });
+            res.json({ status: "ok", boot_timestamp: BOOT_TIMESTAMP });
         }
         catch (err) {
             res.status(500).json({ status: 'error', error: err.message });

@@ -1,0 +1,1 @@
+[github] [ERROR] No git repository found in current workspace. You must execute 'git init' to initialize the project first.

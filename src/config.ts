@@ -52,7 +52,17 @@ export const POLL_INTERVAL = 2000;
 export const SCHEDULER_POLL_INTERVAL = 60000;
 
 // Absolute paths needed for container mounts
-const PROJECT_ROOT = "/app";
+function getProjectRoot(): string {
+  try {
+    if (fs.existsSync('/app')) {
+      fs.accessSync('/app', fs.constants.W_OK);
+      return '/app';
+    }
+  } catch (err) {}
+  return path.resolve('.');
+}
+
+const PROJECT_ROOT = getProjectRoot();
 const HOME_DIR = process.env.HOME || '/root';
 
 // Mount security: allowlist stored OUTSIDE project root, never mounted into containers
@@ -74,7 +84,7 @@ export const GEMINI_SESSION_PATH = path.join(HOME_DIR, '.gemini');
 // For Docker-out-of-Docker (DooD): the path to the project root on the host.
 // If set, mounts will use this path for host-side resolution.
 export const HOST_PROJECT_PATH =
-  process.env.HOST_PROJECT_PATH || envConfig.HOST_PROJECT_PATH;
+  process.env.HOST_PROJECT_PATH || envConfig.HOST_PROJECT_PATH || '/home/ubuntu/powerhouse/project-nanoclaw';
 
 export const CONTAINER_IMAGE =
   process.env.CONTAINER_IMAGE || 'nanoclaw-agent:latest';

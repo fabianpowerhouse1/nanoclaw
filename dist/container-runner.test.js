@@ -2,8 +2,8 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { PassThrough } from 'stream';
 // Sentinel markers must match container-runner.ts
-const OUTPUT_START_MARKER = '---NANOCLAW_OUTPUT_START---';
-const OUTPUT_END_MARKER = '---NANOCLAW_OUTPUT_END---';
+const OUTPUT_START_MARKER = '###NC_JSON_START###';
+const OUTPUT_END_MARKER = '###NC_JSON_END###';
 // Mock config
 vi.mock('./config.js', () => ({
     CONTAINER_IMAGE: 'nanoclaw-agent:latest',
@@ -13,6 +13,11 @@ vi.mock('./config.js', () => ({
     GROUPS_DIR: '/tmp/nanoclaw-test-groups',
     IDLE_TIMEOUT: 1800000, // 30min
     TIMEZONE: 'America/Los_Angeles',
+    PROVIDER: 'gemini-cli',
+    SKILL_SERVICE_URL: 'http://localhost:3000',
+    SKILL_SERVICE_PSK: 'test-psk',
+    HOST_PROJECT_PATH: '/home/ubuntu/powerhouse/project-nanoclaw',
+    GEMINI_SESSION_PATH: '/home/ubuntu/.gemini',
 }));
 // Mock logger
 vi.mock('./logger.js', () => ({
@@ -37,6 +42,9 @@ vi.mock('fs', async () => {
             readdirSync: vi.fn(() => []),
             statSync: vi.fn(() => ({ isDirectory: () => false })),
             copyFileSync: vi.fn(),
+            mkdtempSync: vi.fn(() => '/tmp/agent-home-abc'),
+            rmSync: vi.fn(),
+            chmodSync: vi.fn(),
         },
     };
 });
@@ -83,7 +91,7 @@ const testInput = {
 };
 function emitOutputMarker(proc, output) {
     const json = JSON.stringify(output);
-    proc.stdout.push(`${OUTPUT_START_MARKER}\n${json}\n${OUTPUT_END_MARKER}\n`);
+    proc.stdout.push(`${OUTPUT_START_MARKER}${json}${OUTPUT_END_MARKER}\n`);
 }
 describe('container-runner timeout behavior', () => {
     beforeEach(() => {
@@ -104,8 +112,8 @@ describe('container-runner timeout behavior', () => {
         });
         // Let output processing settle
         await vi.advanceTimersByTimeAsync(10);
-        // Fire the hard timeout (IDLE_TIMEOUT + 30s = 1830000ms)
-        await vi.advanceTimersByTimeAsync(1830000);
+        // Fire the hard timeout (default 600000ms)
+        await vi.advanceTimersByTimeAsync(600001);
         // Emit close event (as if container was stopped by the timeout)
         fakeProc.emit('close', 137);
         // Let the promise resolve
@@ -119,13 +127,13 @@ describe('container-runner timeout behavior', () => {
         const onOutput = vi.fn(async () => { });
         const resultPromise = runContainerAgent(testGroup, testInput, () => { }, onOutput);
         // No output emitted — fire the hard timeout
-        await vi.advanceTimersByTimeAsync(1830000);
+        await vi.advanceTimersByTimeAsync(600001);
         // Emit close event
         fakeProc.emit('close', 137);
         await vi.advanceTimersByTimeAsync(10);
         const result = await resultPromise;
         expect(result.status).toBe('error');
-        expect(result.error).toContain('timed out');
+        expect(result.error).toContain('Timeout');
         expect(onOutput).not.toHaveBeenCalled();
     });
     it('normal exit after output resolves as success', async () => {

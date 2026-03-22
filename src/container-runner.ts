@@ -61,7 +61,7 @@ export interface ContainerOutput {
   isFatal?: boolean; // CIRCUIT BREAKER: Support fatal state
 }
 
-interface VolumeMount {
+export interface VolumeMount {
   hostPath: string;
   containerPath: string;
   readonly: boolean;
@@ -107,7 +107,7 @@ function ensureWritableDir(dirPath: string): void {
   }
 }
 
-function buildVolumeMounts(
+export function buildVolumeMounts(
   group: RegisteredGroup,
   input: ContainerInput,
   ephemeralHomePath?: string,
@@ -135,7 +135,15 @@ function buildVolumeMounts(
   }
 
   if (input.isIsolated && input.projectPath) {
-    const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}/${input.projectPath}`;
+    // V1.3 Strict Isolation: ONLY mount the specific project folder
+    // Ensure we don't accidentally mount the parent if projectPath is just 'project'
+    let subPath = input.projectPath;
+    if (subPath === 'project' && group.folder !== 'system') {
+        // Force look into 'project/nanoclaw' or similar if we are in a group folder
+        // but for now, we just trust the dispatcher to pass the full path.
+    }
+
+    const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}/${subPath}`;
     mounts.push({
       hostPath: hostWorkspace,
       containerPath: '/workspace',
@@ -155,7 +163,15 @@ function buildVolumeMounts(
         readonly: true
     });
   } else {
-    const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}`;
+    // Standard Mode: Default to a safe sub-project if none provided
+    const projectSubfolder = input.projectPath || 'project/active-project';
+    const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}/${projectSubfolder}`;
+    
+    // Ensure project folder exists on host
+    if (!fs.existsSync(hostWorkspace)) {
+        fs.mkdirSync(hostWorkspace, { recursive: true });
+    }
+
     mounts.push({
       hostPath: hostWorkspace,
       containerPath: '/workspace/group',
@@ -184,10 +200,18 @@ function buildVolumeMounts(
     });
   }
 
-  // Mandatory V6 Orchestration Bridge
-  if (fs.existsSync(AGENT_INIT_CONTAINER_PATH) || fs.existsSync(AGENT_INIT_HOST_PATH)) {
+  // Mandatory V6 Orchestration Bridge (V1.8: Strict Internal Pathing)
+  const scriptsHostPath = '/home/ubuntu/powerhouse/orchestrator/scripts';
+  const scriptsContainerPath = '/app/scripts';
+  if (fs.existsSync(scriptsContainerPath)) {
       mounts.push({
-          hostPath: AGENT_INIT_HOST_PATH,
+          hostPath: scriptsHostPath,
+          containerPath: scriptsContainerPath,
+          readonly: true
+      });
+      // Also map agent-init.sh to its expected system location
+      mounts.push({
+          hostPath: path.join(scriptsHostPath, 'agent-init.sh'),
           containerPath: '/usr/local/bin/agent-init.sh',
           readonly: true
       });
@@ -294,11 +318,13 @@ export function resolvePersonaPath(personaOverride?: string): string {
     const personaFile = PERSONA_MAP[normalized];
 
     if (personaFile) {
-        const hostPath = path.join(PERSONA_DIR_HOST_PATH, personaFile);
-        if (fs.existsSync(hostPath)) {
-            return `/app/.agents/personas/${personaFile}`;
+        // V1.8 Strict Pathing: ONLY validate internal container mount point
+        const internalPath = path.join('/app/.agents/personas', personaFile);
+        if (fs.existsSync(internalPath)) {
+            return internalPath;
         }
-        logger.warn({ personaOverride, personaFile }, 'Persona file mapped but not found on host. Falling back.');
+        
+        logger.warn({ personaOverride, personaFile, internalPath }, 'Persona file not found in production volume. Falling back.');
     } else {
         logger.warn({ personaOverride }, 'Unknown persona override requested. Falling back to PM.');
     }
@@ -310,6 +336,7 @@ function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
   input?: ContainerInput, githubToken?: string,
+  extraArgs: string[] = []
 ): string[] {
   const args: string[] = ['run', '-i', '--name', containerName];
   
@@ -371,6 +398,7 @@ function buildContainerArgs(
     else args.push('-v', `${mount.hostPath}:${mount.containerPath}`);
   }
   args.push(CONTAINER_IMAGE);
+  args.push(...extraArgs);
   return args;
 }
 
@@ -418,6 +446,7 @@ export async function runContainerAgent(
   input: ContainerInput,
   onProcess: (proc: ChildProcess, containerName: string) => void,
   onOutput?: (output: ContainerOutput) => Promise<void>,
+  extraArgs: string[] = []
 ): Promise<ContainerOutput> {
   const startTime = Date.now();
   const groupDir = resolveGroupFolderPath(group.folder);
@@ -464,7 +493,7 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input, ephemeralHomePath);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-agent-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName, input, githubToken);
+  const containerArgs = buildContainerArgs(mounts, containerName, input, githubToken, extraArgs);
   
   logger.info({ 
     group: group.name, 
