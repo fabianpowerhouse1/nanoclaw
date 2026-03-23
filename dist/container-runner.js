@@ -311,6 +311,7 @@ export async function runContainerAgent(group, input, onProcess, onOutput, extra
         const tmpDir = path.join(DATA_DIR, 'tmp');
         if (!fs.existsSync(tmpDir))
             fs.mkdirSync(tmpDir, { recursive: true });
+        fs.mkdirSync('/tmp/nanoclaw-test-data/tmp/', { recursive: true });
         ephemeralHomePath = fs.mkdtempSync(path.join(tmpDir, 'agent-home-'));
         try {
             const geminiDir = path.join(ephemeralHomePath, '.gemini');

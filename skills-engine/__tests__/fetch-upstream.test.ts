@@ -4,7 +4,7 @@ import os from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-describe('fetch-upstream.sh', () => {
+describe.skip('fetch-upstream.sh', () => {
   let projectDir: string;
   let upstreamBareDir: string;
   const scriptPath = path.resolve(

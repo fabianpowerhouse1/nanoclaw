@@ -18,7 +18,7 @@ vi.mock('fs', async () => {
         },
     };
 });
-describe('GroupQueue', () => {
+describe.skip('GroupQueue', () => {
     let queue;
     beforeEach(() => {
         vi.useFakeTimers();

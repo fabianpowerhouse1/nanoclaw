@@ -5,7 +5,12 @@ import path from 'path';
 import { stringify } from 'yaml';
 
 export function createTempDir(): string {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'nanoclaw-test-'));
+  const root = process.cwd();
+  const testTmp = path.join(root, '.test-tmp');
+  if (!fs.existsSync(testTmp)) {
+    fs.mkdirSync(testTmp, { recursive: true });
+  }
+  return fs.mkdtempSync(path.join(testTmp, 'nanoclaw-test-'));
 }
 
 export function setupNanoclawDir(tmpDir: string): void {
