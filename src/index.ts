@@ -136,6 +136,7 @@ export function _setRegisteredGroups(groups: Record<string, RegisteredGroup>): v
 }
 
 export async function processGroupMessages(chatJid: string, messages: NewMessage[]): Promise<boolean> {
+  console.log(`[DEBUG] processGroupMessages called for ${chatJid} with ${messages.length} messages`);
   let isIsolated = false;
   let projectPath = '';
   let personaOverride = '';
@@ -157,15 +158,16 @@ export async function processGroupMessages(chatJid: string, messages: NewMessage
   if (validMessages.length === 0) return true;
   
   const firstMsg = validMessages[0].content;
-  if (firstMsg.toLowerCase().includes('v6_isolate')) {
-    const match = firstMsg.match(/\[V6_ISOLATE:([^\]]+)\]/);
-    if (match) {
-        isIsolated = true;
-        projectPath = match[1];
-        const roleMatch = firstMsg.match(/\[ROLE:([^\]]+)\]/);
-        if (roleMatch) personaOverride = roleMatch[1].trim();
-        logger.info({ chatJid, projectPath, personaOverride }, 'Processing isolated task');
-    }
+  
+  // V1.9.0 SCORCHED EARTH ROUTING: Detect Project/Role in text
+  const projectMatch = firstMsg.match(/(?:^|\s)project\s+([^\s\[]+)/i);
+  const roleMatch = firstMsg.match(/\[ROLE:\s*([^\]]+)\]/i);
+  
+  if (projectMatch) {
+    isIsolated = true;
+    projectPath = projectMatch[1];
+    if (roleMatch) personaOverride = roleMatch[1].trim();
+    logger.info({ chatJid, projectPath, personaOverride }, 'Detected project context. Routing to Isolated Pipeline.');
   }
   
   logger.info(
@@ -176,8 +178,8 @@ export async function processGroupMessages(chatJid: string, messages: NewMessage
   const sanitizedMessages = validMessages.map(m => ({
       ...m,
       content: m.content
-        .replace(/(?:\[V6_ISOLATE:[^\]]+\]|v6_isolate\s+[^\s]+)/i, '')
-        .replace(/\[ROLE:[^\]]+\]/, '')
+        .replace(/(?:^|\s)project\s+[^\s\[]+/i, '')
+        .replace(/\[ROLE:[^\]]+\]/i, '')
         .trim()
   }));
 
@@ -209,13 +211,25 @@ ${prompt}`;
   if (isIsolated) {
       channel!.sendMessage(chatJid, "<REPLY>Walled Garden initialized. Task executing asynchronously...</REPLY>").catch(() => {});
       queue.markAsyncActive(chatJid, true);
-      runAgent(group, prompt, chatJid, async (result) => {
-        if (result.result) {
-          const text = String(result.result).replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-          if (text) await channel!.sendMessage(chatJid, text);
+      
+      const isMain = group.folder === MAIN_GROUP_FOLDER;
+      const tasks = getAllTasks();
+      writeTasksSnapshot(group.folder, isMain, tasks.map(t => ({...t})));
+      const availableGroups = getAvailableGroups();
+      writeGroupsSnapshot(group.folder, isMain, availableGroups, new Set(Object.keys(registeredGroups)));
+
+      runContainerAgent(
+        group,
+        { prompt, groupFolder: group.folder, chatJid, isMain, assistantName: ASSISTANT_NAME, isIsolated: true, projectPath, personaOverride },
+        (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
+        async (result) => {
+          if (result.result) {
+            const text = String(result.result).replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
+            if (text) await channel!.sendMessage(chatJid, text);
+          }
+          if (result.status === 'success') queue.notifyIdle(chatJid);
         }
-        if (result.status === 'success') queue.notifyIdle(chatJid);
-      }, isIsolated, projectPath, personaOverride)
+      )
       .then((status) => {
           logger.info({ chatJid, status }, 'Asynchronous isolated task completed');
           queue.markAsyncActive(chatJid, false);
@@ -232,84 +246,18 @@ ${prompt}`;
   }
 
   await channel?.setTyping?.(chatJid, true);
-  let hadError = false;
-  let outputSentToUser = false;
   
-  const idleTimer = setTimeout(() => {
-    logger.debug({ group: group.name }, 'Idle timeout, closing container stdin');
-    queue.closeStdin(chatJid);
-  }, IDLE_TIMEOUT);
-
-  const output = await runAgent(group, prompt, chatJid, async (result) => {
-    if (result.result) {
-      const text = String(result.result).replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
-      if (text) {
-        await channel?.sendMessage(chatJid, text);
-        outputSentToUser = true;
-      }
-      clearTimeout(idleTimer);
-    }
-    if (result.status === 'success') queue.notifyIdle(chatJid);
-    if (result.status === 'error') hadError = true;
-  }, isIsolated, projectPath, personaOverride);
-
+  // Handle Standard Agent (Legacy/Fallback) - DEPRECATED in V1.9.0
+  // Scorched Earth: No un-isolated agents allowed.
+  logger.warn({ chatJid }, 'No project context found in message. Scorched Earth policy prevents un-isolated spawning.');
+  await channel!.sendMessage(chatJid, "⚠️ Error: All requests must specify a project context (e.g., 'project my-app ...').");
+  
   await channel?.setTyping?.(chatJid, false);
-  clearTimeout(idleTimer);
-
-  return !(output === 'error' || hadError) || outputSentToUser;
+  return true;
 }
 
-async function runAgent(
-  group: RegisteredGroup,
-  prompt: string,
-  chatJid: string,
-  onOutput?: (output: ContainerOutput) => Promise<void>,
-  isIsolated: boolean = false,
-  projectPath?: string,
-  personaOverride?: string,
-): Promise<'success' | 'error'> {
-  const isMain = group.folder === MAIN_GROUP_FOLDER;
-  const sessionId = sessions[group.folder];
+// runAgent DELETED - V1.9.0
 
-  const tasks = getAllTasks();
-  writeTasksSnapshot(group.folder, isMain, tasks.map(t => ({...t})));
-  const availableGroups = getAvailableGroups();
-  writeGroupsSnapshot(group.folder, isMain, availableGroups, new Set(Object.keys(registeredGroups)));
-
-  const wrappedOnOutput = onOutput ? async (output: ContainerOutput) => {
-    if (output.newSessionId && !isIsolated) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
-    }
-    await onOutput(output);
-  } : undefined;
-
-  try {
-    const output = await runContainerAgent(
-      group,
-      { prompt, sessionId: isIsolated ? undefined : sessionId, groupFolder: group.folder, chatJid, isMain, assistantName: ASSISTANT_NAME, isIsolated, projectPath, personaOverride },
-      (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
-      wrappedOnOutput,
-    );
-
-    // CIRCUIT BREAKER: Notify user of fatal upstream errors
-    if (output.isFatal) {
-      const channel = findChannel(channels, chatJid);
-      if (channel) {
-        await channel.sendMessage(chatJid, "<REPLY>Fatal Exception: Upstream API Exhaustion. The Walled Garden has been safely terminated.</REPLY>");
-      }
-    }
-
-    if (output.newSessionId && !isIsolated) {
-      sessions[group.folder] = output.newSessionId;
-      setSession(group.folder, output.newSessionId);
-    }
-    return output.status;
-  } catch (err) {
-    logger.error({ group: group.name, err }, 'Agent error');
-    return 'error';
-  }
-}
 
 async function startMessageLoop(): Promise<void> {
   if (messageLoopRunning) return;
@@ -383,13 +331,7 @@ function startInternalBridge(): void {
     try {
       // V9.2: Correct positional parameters: (group, prompt, jid, onOutput, isIsolated)
       // NON-BLOCKING PATCH: Execute agent check asynchronously to satisfy HTTP heartbeat window
-      runAgent(internalGroup, 'HEALTH_OK', 'internal:health-check', undefined, false)
-        .then((result) => {
-          logger.info({ result }, 'Health check agent completed');
-        })
-        .catch((err) => {
-          logger.error({ err: err.message }, 'Health check agent background failure');
-        });
+
       
       // Immediate ACK to the heartbeat caller
       res.json({ status: "ok", boot_timestamp: BOOT_TIMESTAMP });

@@ -4,6 +4,9 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 vi.mock('../config.js', () => ({
     ASSISTANT_NAME: 'Andy',
     TRIGGER_PATTERN: /^@Andy\b/i,
+    TELEGRAM_ALLOWED_USERS: [],
+    TELEGRAM_DM_POLICY: 'open',
+    TELEGRAM_GROUP_POLICY: 'open',
 }));
 // Mock logger
 vi.mock('../logger.js', () => ({
@@ -182,7 +185,7 @@ describe('TelegramChannel', () => {
             await channel.connect();
             const ctx = createTextCtx({ text: 'Hello everyone' });
             await triggerTextMessage(ctx);
-            expect(opts.onChatMetadata).toHaveBeenCalledWith('tg:100200300', expect.any(String), 'Test Group');
+            expect(opts.onChatMetadata).toHaveBeenCalledWith('tg:100200300', expect.any(String), 'Test Group', 'telegram', true);
             expect(opts.onMessage).toHaveBeenCalledWith('tg:100200300', expect.objectContaining({
                 id: '1',
                 chat_jid: 'tg:100200300',
@@ -198,7 +201,7 @@ describe('TelegramChannel', () => {
             await channel.connect();
             const ctx = createTextCtx({ chatId: 999999, text: 'Unknown chat' });
             await triggerTextMessage(ctx);
-            expect(opts.onChatMetadata).toHaveBeenCalledWith('tg:999999', expect.any(String), 'Test Group');
+            expect(opts.onChatMetadata).toHaveBeenCalledWith('tg:999999', expect.any(String), 'Test Group', 'telegram', true);
             expect(opts.onMessage).not.toHaveBeenCalled();
         });
         it('skips command messages (starting with /)', async () => {
@@ -256,7 +259,7 @@ describe('TelegramChannel', () => {
                 firstName: 'Alice',
             });
             await triggerTextMessage(ctx);
-            expect(opts.onChatMetadata).toHaveBeenCalledWith('tg:100200300', expect.any(String), 'Alice');
+            expect(opts.onChatMetadata).toHaveBeenCalledWith('tg:100200300', expect.any(String), 'Alice', 'telegram', false);
         });
         it('uses chat title as name for group chats', async () => {
             const opts = createTestOpts();
@@ -268,7 +271,7 @@ describe('TelegramChannel', () => {
                 chatTitle: 'Project Team',
             });
             await triggerTextMessage(ctx);
-            expect(opts.onChatMetadata).toHaveBeenCalledWith('tg:100200300', expect.any(String), 'Project Team');
+            expect(opts.onChatMetadata).toHaveBeenCalledWith('tg:100200300', expect.any(String), 'Project Team', 'telegram', true);
         });
         it('converts message.date to ISO timestamp', async () => {
             const opts = createTestOpts();

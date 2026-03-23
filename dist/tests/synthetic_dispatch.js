@@ -27,6 +27,8 @@ async function runTest() {
     try {
         const output = await runContainerAgent(mockGroup, mockInput, (proc, name) => {
             console.log(`[DISPATCH] Agent spawned: ${name}`);
+            proc.stdout?.on('data', (d) => console.log(`[STDOUT] ${d.toString()}`));
+            proc.stderr?.on('data', (d) => console.error(`[STDERR] ${d.toString()}`));
         }, async (chunk) => {
             // Stream logs to console for ITM visibility
             if (chunk.result)

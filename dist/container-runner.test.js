@@ -88,6 +88,8 @@ const testInput = {
     groupFolder: 'test-group',
     chatJid: 'test@g.us',
     isMain: false,
+    isIsolated: true,
+    projectPath: 'test-project',
 };
 function emitOutputMarker(proc, output) {
     const json = JSON.stringify(output);

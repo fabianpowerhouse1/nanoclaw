@@ -6,6 +6,9 @@ import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 vi.mock('../config.js', () => ({
   ASSISTANT_NAME: 'Andy',
   TRIGGER_PATTERN: /^@Andy\b/i,
+  TELEGRAM_ALLOWED_USERS: [],
+  TELEGRAM_DM_POLICY: 'open',
+  TELEGRAM_GROUP_POLICY: 'open',
 }));
 
 // Mock logger
@@ -255,6 +258,8 @@ describe('TelegramChannel', () => {
         'tg:100200300',
         expect.any(String),
         'Test Group',
+        'telegram',
+        true
       );
       expect(opts.onMessage).toHaveBeenCalledWith(
         'tg:100200300',
@@ -281,6 +286,8 @@ describe('TelegramChannel', () => {
         'tg:999999',
         expect.any(String),
         'Test Group',
+        'telegram',
+        true
       );
       expect(opts.onMessage).not.toHaveBeenCalled();
     });
@@ -366,7 +373,9 @@ describe('TelegramChannel', () => {
       expect(opts.onChatMetadata).toHaveBeenCalledWith(
         'tg:100200300',
         expect.any(String),
-        'Alice', // Private chats use sender name
+        'Alice',
+        'telegram',
+        false
       );
     });
 
@@ -386,6 +395,8 @@ describe('TelegramChannel', () => {
         'tg:100200300',
         expect.any(String),
         'Project Team',
+        'telegram',
+        true
       );
     });
 

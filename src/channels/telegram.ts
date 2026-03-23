@@ -63,9 +63,8 @@ export class TelegramChannel implements Channel {
     this.bot.on('message:text', async (ctx) => {
       logger.info({ chat: ctx.chat.id, from: ctx.from?.id, text: ctx.message.text }, 'RAW INBOUND TELEGRAM MESSAGE');
       
-      // Skip commands (except our experimental isolation command)
-      const isIsolationCommand = ctx.message.text.startsWith('/v6_isolate');
-      if (ctx.message.text.startsWith('/') && !isIsolationCommand) return;
+      // Skip commands
+      if (ctx.message.text.startsWith('/')) return;
 
       const senderId = ctx.from?.id.toString() || '';
       
@@ -78,17 +77,6 @@ export class TelegramChannel implements Channel {
       const chatJid = `tg:${ctx.chat.id}`;
       let content = ctx.message.text;
       
-      // EXPERIMENTAL SHADOW ROUTE: Extract Project Isolation Metadata
-      if (isIsolationCommand) {
-        const parts = content.split(' ');
-        if (parts.length >= 2) {
-          const project = parts[1];
-          const remaining = parts.slice(2).join(' ').trim();
-          content = `[V6_ISOLATE:${project}] ${remaining || 'Initiate isolated session.'}`;
-          logger.info({ chatJid, project }, 'Telegram experimental isolation command detected');
-        }
-      }
-
       const timestamp = new Date(ctx.message.date * 1000).toISOString();
       const senderName =
         ctx.from?.first_name ||

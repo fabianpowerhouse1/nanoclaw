@@ -84,13 +84,15 @@ vi.mock('child_process', async () => {
     };
 });
 import { runContainerAgent } from './container-runner.js';
+import fs from 'fs';
 describe('V6.10 Repro: Missing JSON Markers (FIXED)', () => {
     beforeEach(() => {
         fakeProc = createFakeProcess();
+        fs.mkdirSync('/tmp/nanoclaw-test-data/tmp', { recursive: true });
     });
     it('successfully triggers onOutput when raw text is emitted (GREEN STATE)', async () => {
         const onOutput = vi.fn(async () => { });
-        const resultPromise = runContainerAgent({ name: 'Test', folder: 'test' }, { prompt: 'Hello' }, () => { }, onOutput);
+        const resultPromise = runContainerAgent({ name: 'Test', folder: 'test' }, { prompt: 'Hello', isIsolated: true, projectPath: 'test-project' }, () => { }, onOutput);
         // Emit raw text WITHOUT markers
         fakeProc.stdout.push('Hello from the other side\n');
         // Settle streams
@@ -109,7 +111,7 @@ describe('V6.10 Repro: Missing JSON Markers (FIXED)', () => {
     });
     it('triggers onOutput when JSON markers ARE present', async () => {
         const onOutput = vi.fn(async () => { });
-        const resultPromise = runContainerAgent({ name: 'Test', folder: 'test' }, { prompt: 'Hello' }, () => { }, onOutput);
+        const resultPromise = runContainerAgent({ name: 'Test', folder: 'test' }, { prompt: 'Hello', isIsolated: true, projectPath: 'test-project' }, () => { }, onOutput);
         // Emit valid JSON markers
         fakeProc.stdout.push(`${OUTPUT_START_MARKER}\n{"status":"success","result":"Valid JSON"}\n${OUTPUT_END_MARKER}\n`);
         await new Promise(r => setTimeout(r, 50));

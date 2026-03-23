@@ -31,7 +31,7 @@ describe('GroupQueue', () => {
     it('only runs one container per group at a time', async () => {
         let concurrentCount = 0;
         let maxConcurrent = 0;
-        const processMessages = vi.fn(async (groupJid) => {
+        const processMessages = vi.fn(async (groupJid, messages) => {
             concurrentCount++;
             maxConcurrent = Math.max(maxConcurrent, concurrentCount);
             // Simulate async work
@@ -53,7 +53,7 @@ describe('GroupQueue', () => {
         let activeCount = 0;
         let maxActive = 0;
         const completionCallbacks = [];
-        const processMessages = vi.fn(async (groupJid) => {
+        const processMessages = vi.fn(async (groupJid, messages) => {
             activeCount++;
             maxActive = Math.max(maxActive, activeCount);
             await new Promise((resolve) => completionCallbacks.push(resolve));
@@ -79,7 +79,7 @@ describe('GroupQueue', () => {
     it('drains tasks before messages for same group', async () => {
         const executionOrder = [];
         let resolveFirst;
-        const processMessages = vi.fn(async (groupJid) => {
+        const processMessages = vi.fn(async (groupJid, messages) => {
             if (executionOrder.length === 0) {
                 // First call: block until we release it
                 await new Promise((resolve) => {
@@ -165,7 +165,7 @@ describe('GroupQueue', () => {
     it('drains waiting groups when active slots free up', async () => {
         const processed = [];
         const completionCallbacks = [];
-        const processMessages = vi.fn(async (groupJid) => {
+        const processMessages = vi.fn(async (groupJid, messages) => {
             processed.push(groupJid);
             await new Promise((resolve) => completionCallbacks.push(resolve));
             return true;

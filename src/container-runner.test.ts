@@ -105,6 +105,8 @@ const testInput = {
   groupFolder: 'test-group',
   chatJid: 'test@g.us',
   isMain: false,
+  isIsolated: true,
+  projectPath: 'test-project',
 };
 
 function emitOutputMarker(proc: ReturnType<typeof createFakeProcess>, output: ContainerOutput) {

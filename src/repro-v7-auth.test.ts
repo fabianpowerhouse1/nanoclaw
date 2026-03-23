@@ -79,17 +79,19 @@ vi.mock('child_process', async () => {
 
 import { runContainerAgent } from './container-runner.js';
 
-describe('V7.0 Repro: Secure Secrets Proxy (GREEN STATE)', () => {
-  it('mounts a proxy /root volume for isolated runs', async () => {
+describe('V7.0 Repro: Secure Secrets Proxy (V1.9.0 Updated)', () => {
+  it('does NOT mount /root and uses HOME=/tmp for isolated runs (V1.9.0 Scorched Earth)', async () => {
     const resultPromise = runContainerAgent(
       { name: 'Test', folder: 'test' } as any,
-      { prompt: 'Hello', isIsolated: true } as any,
+      { prompt: 'Hello', isIsolated: true, projectPath: 'test-project' } as any,
       () => {}
     );
 
-    // Verify V7 state: Should have a standalone /root proxy mount
+    // Verify V1.9.0 state: Should use HOME=/tmp and NOT mount /root
     const rootMount = lastSpawnArgs.find(arg => arg.endsWith(':/root'));
-    expect(rootMount).toBeDefined();
-    expect(rootMount).toContain('agent-home-');
+    expect(rootMount).toBeUndefined();
+    
+    const homeArg = lastSpawnArgs.find(arg => arg === 'HOME=/tmp');
+    expect(homeArg).toBeDefined();
   });
 });

@@ -114,70 +114,39 @@ export function buildVolumeMounts(
 ): VolumeMount[] {
   const mounts: VolumeMount[] = [];
   
-  if (input.isIsolated && ephemeralHomePath) {
+  if (!input.isIsolated || !input.projectPath) {
+      throw new Error('[SCORCHED_EARTH_VIOLATION] Attempted legacy non-isolated spawn. All agents MUST specify a project context.');
+  }
+
+  if (ephemeralHomePath) {
     // Mount ephemeral home to /tmp/home inside the container to avoid /root shadowing
     mounts.push({
       hostPath: toHostPath(ephemeralHomePath),
       containerPath: '/tmp/home',
       readonly: false,
     });
-  } else if (PROVIDER === 'gemini-cli' && fs.existsSync(GEMINI_SESSION_PATH)) {
-    mounts.push({
-      hostPath: "/home/ubuntu/.gemini",
-      containerPath: '/root/.gemini',
-      readonly: false,
-    });
-    mounts.push({
-        hostPath: "/home/ubuntu/.gemini",
-        containerPath: '/home/node/.gemini',
-        readonly: false,
-    });
   }
 
-  if (input.isIsolated && input.projectPath) {
-    // V1.3 Strict Isolation: ONLY mount the specific project folder
-    // Ensure we don't accidentally mount the parent if projectPath is just 'project'
-    let subPath = input.projectPath;
-    if (subPath === 'project' && group.folder !== 'system') {
-        // Force look into 'project/nanoclaw' or similar if we are in a group folder
-        // but for now, we just trust the dispatcher to pass the full path.
-    }
+  // V1.3 Strict Isolation: ONLY mount the specific project folder
+  const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}/${input.projectPath}`;
+  mounts.push({
+    hostPath: hostWorkspace,
+    containerPath: '/workspace',
+    readonly: false,
+  });
+  
+  mounts.push({
+      hostPath: '/home/ubuntu/powerhouse/orchestrator/.agents',
+      containerPath: '/app/.agents',
+      readonly: true
+  });
 
-    const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}/${subPath}`;
-    mounts.push({
-      hostPath: hostWorkspace,
-      containerPath: '/workspace',
-      readonly: false,
-    });
-    
-    mounts.push({
-        hostPath: '/home/ubuntu/powerhouse/orchestrator/.agents',
-        containerPath: '/app/.agents',
-        readonly: true
-    });
-
-    // PLATFORM SKILL INTERFACE (V8.0)
-    mounts.push({
-        hostPath: SKILLS_DIR,
-        containerPath: '/app/skills',
-        readonly: true
-    });
-  } else {
-    // Standard Mode: Default to a safe sub-project if none provided
-    const projectSubfolder = input.projectPath || 'project/active-project';
-    const hostWorkspace = `/home/ubuntu/powerhouse/workspaces/${group.folder}/${projectSubfolder}`;
-    
-    // Ensure project folder exists on host
-    if (!fs.existsSync(hostWorkspace)) {
-        fs.mkdirSync(hostWorkspace, { recursive: true });
-    }
-
-    mounts.push({
-      hostPath: hostWorkspace,
-      containerPath: '/workspace/group',
-      readonly: false,
-    });
-  }
+  // PLATFORM SKILL INTERFACE (V8.0)
+  mounts.push({
+      hostPath: SKILLS_DIR,
+      containerPath: '/app/skills',
+      readonly: true
+  });
 
   mounts.push({
     hostPath: '/home/ubuntu/powerhouse/data/active_sessions',
@@ -357,12 +326,8 @@ function buildContainerArgs(
   
   const personaPath = resolvePersonaPath(input?.personaOverride);
   
-  if (input?.isIsolated && input?.personaOverride) {
-      args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=${personaPath}`);
-      args.push('-e', 'ISOLATED_WORKSPACE=true');
-  } else {
-      args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=/workspace/active_sessions/pilot-alpha_pm_prompt.txt`);
-  }
+  args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=${personaPath}`);
+  args.push('-e', 'ISOLATED_WORKSPACE=true');
 
   args.push('-e', `TZ=${TIMEZONE}`);
   args.push('-e', `LLM_TIMEOUT_MS=${process.env.LLM_TIMEOUT_MS || '600000'}`);
@@ -377,21 +342,14 @@ function buildContainerArgs(
   const hostGid = process.getgid?.();
 
   // ENV INJECTION FOR AGENT-INIT.SH
-  args.push('-e', `ACTIVE_WORKSPACE_PATH=${input?.isIsolated ? '/workspace' : '/workspace/group'}`);
+  args.push('-e', 'ACTIVE_WORKSPACE_PATH=/workspace');
   args.push('-e', `INJECTED_PROMPT_PATH=${personaPath}`);
 
-  if (input?.isIsolated) {
-      args.push("--workdir", "/workspace");
-      args.push('--cap-drop=ALL');
-      args.push('--security-opt', 'no-new-privileges');
-      // V1.3 FIX: Always use /tmp for HOME in isolated mode to avoid "Neutered Root" permission deadlocks in /root
-      args.push('-e', 'HOME=/tmp');
-  } else if (hostUid != null && hostUid !== 0 && hostUid !== 1000) {
-    args.push('--user', `${hostUid}:${hostGid}`);
-    args.push('-e', 'HOME=/tmp');
-  } else {
-    args.push('-e', `HOME=${hostUid === 0 ? '/tmp' : '/tmp'}`);
-  }
+  args.push("--workdir", "/workspace");
+  args.push('--cap-drop=ALL');
+  args.push('--security-opt', 'no-new-privileges');
+  // V1.3 FIX: Always use /tmp for HOME in isolated mode to avoid "Neutered Root" permission deadlocks in /root
+  args.push('-e', 'HOME=/tmp');
 
   for (const mount of mounts) {
     if (mount.readonly) args.push(...readonlyMountArgs(mount.hostPath, mount.containerPath));

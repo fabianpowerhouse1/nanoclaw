@@ -92,17 +92,19 @@ vi.mock('child_process', async () => {
 });
 
 import { runContainerAgent } from './container-runner.js';
+import fs from 'fs';
 
 describe('V6.10 Repro: Missing JSON Markers (FIXED)', () => {
   beforeEach(() => {
     fakeProc = createFakeProcess();
+    fs.mkdirSync('/tmp/nanoclaw-test-data/tmp', { recursive: true });
   });
 
   it('successfully triggers onOutput when raw text is emitted (GREEN STATE)', async () => {
     const onOutput = vi.fn(async () => {});
     const resultPromise = runContainerAgent(
       { name: 'Test', folder: 'test' } as any,
-      { prompt: 'Hello' } as any,
+      { prompt: 'Hello', isIsolated: true, projectPath: 'test-project' } as any,
       () => {},
       onOutput
     );
@@ -132,7 +134,7 @@ describe('V6.10 Repro: Missing JSON Markers (FIXED)', () => {
     const onOutput = vi.fn(async () => {});
     const resultPromise = runContainerAgent(
       { name: 'Test', folder: 'test' } as any,
-      { prompt: 'Hello' } as any,
+      { prompt: 'Hello', isIsolated: true, projectPath: 'test-project' } as any,
       () => {},
       onOutput
     );
