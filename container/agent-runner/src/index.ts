@@ -128,12 +128,12 @@ async function runClaudeQuery(
 
     // V0.6 GUILLOTINE: Configurable SDK Limit (V0.8)
     const sdkTimeout = setTimeout(() => {
-        const timeoutVal = Number(process.env.LLM_TIMEOUT_MS) || 600000;
+        const timeoutVal = Number(process.env.LLM_TIMEOUT_MS) || 1200000;
         log(`[SYSTEM_FATAL] SDK Timeout: ${timeoutVal}ms limit reached`);
         process.stdout.write(`\n[SYSTEM_FATAL] SDK Timeout: ${timeoutVal}ms limit reached\n`);
         claude.kill('SIGKILL');
         process.exit(1);
-    }, Number(process.env.LLM_TIMEOUT_MS) || 600000);
+    }, Number(process.env.LLM_TIMEOUT_MS) || 1200000);
 
     let stdout = '';
     let lastAssistantUuid: string | undefined;
@@ -217,12 +217,12 @@ async function runGeminiQuery(
 
     // V0.6 GUILLOTINE: Configurable SDK Limit (V0.8)
     const sdkTimeout = setTimeout(() => {
-        const timeoutVal = Number(process.env.LLM_TIMEOUT_MS) || 600000;
+        const timeoutVal = Number(process.env.LLM_TIMEOUT_MS) || 1200000;
         log(`[SYSTEM_FATAL] SDK Timeout: ${timeoutVal}ms limit reached`);
         process.stdout.write(`\n[SYSTEM_FATAL] SDK Timeout: ${timeoutVal}ms limit reached\n`);
         gemini.kill('SIGKILL');
         process.exit(1);
-    }, Number(process.env.LLM_TIMEOUT_MS) || 600000);
+    }, Number(process.env.LLM_TIMEOUT_MS) || 1200000);
 
     let stdout = '';
     let closedDuringQuery = false;
