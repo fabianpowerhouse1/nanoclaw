@@ -143,8 +143,8 @@ describe('container-runner timeout behavior', () => {
     // Let output processing settle
     await vi.advanceTimersByTimeAsync(10);
 
-    // Fire the hard timeout (default 600000ms)
-    await vi.advanceTimersByTimeAsync(600001);
+    // Fire the hard timeout (default 1200000ms)
+    await vi.advanceTimersByTimeAsync(1200001);
 
     // Emit close event (as if container was stopped by the timeout)
     fakeProc.emit('close', 137);
@@ -170,7 +170,7 @@ describe('container-runner timeout behavior', () => {
     );
 
     // No output emitted — fire the hard timeout
-    await vi.advanceTimersByTimeAsync(600001);
+    await vi.advanceTimersByTimeAsync(1200001);
 
     // Emit close event
     fakeProc.emit('close', 137);

@@ -330,7 +330,7 @@ function buildContainerArgs(
   args.push('-e', 'ISOLATED_WORKSPACE=true');
 
   args.push('-e', `TZ=${TIMEZONE}`);
-  args.push('-e', `LLM_TIMEOUT_MS=${process.env.LLM_TIMEOUT_MS || '600000'}`);
+  args.push('-e', `LLM_TIMEOUT_MS=${process.env.LLM_TIMEOUT_MS || '1200000'}`);
   args.push('-e', `LLM_MODEL=${process.env.LLM_MODEL || ''}`);
   if (SKILL_SERVICE_URL) {
     args.push('-e', `SKILL_SERVICE_URL=${SKILL_SERVICE_URL}`);
@@ -535,7 +535,7 @@ export async function runContainerAgent(
     });
 
     let timedOut = false;
-    const timeoutMs = Number(process.env.CONTAINER_TTL_MS) || 600000;
+    const timeoutMs = Number(process.env.CONTAINER_TTL_MS) || 1200000;
     const killOnTimeout = () => {
       timedOut = true;
       exec(`docker stop -t 1 ${containerName}`, { timeout: 15000 }, (err) => {
@@ -554,7 +554,7 @@ export async function runContainerAgent(
           resolve({ 
             status: 'error', 
             result: null, 
-            error: `[SYSTEM_FATAL] Execution Timeout: ${Number(process.env.CONTAINER_TTL_MS) || 600000}ms limit reached`,
+            error: `[SYSTEM_FATAL] Execution Timeout: ${Number(process.env.CONTAINER_TTL_MS) || 1200000}ms limit reached`,
             isFatal: true
           });
           return;
