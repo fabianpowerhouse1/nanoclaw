@@ -1,6 +1,6 @@
 import { describe, test, expect, vi } from 'vitest';
 import request from 'supertest';
-import app from './app';
+import app from './app.js';
 
 describe('API Layer - Monitor Routing', () => {
   test('GET /api/monitor should return 200 with status and latency', async () => {

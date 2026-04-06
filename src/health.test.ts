@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'vitest';
 import request from 'supertest';
-import app from '../src/app';
+import app from '../src/app.js';
 
 describe('HealthCheck System - SDD Compliance', () => {
   test('GET /health should return 200 OK', async () => {

@@ -1,0 +1,1 @@
+{"version":3,"file":"monitor.d.ts","sourceRoot":"","sources":["../../src/services/monitor.ts"],"names":[],"mappings":"AAAA,qBAAa,cAAc;IACzB;;;OAGG;IACG,IAAI,CAAC,GAAG,EAAE,MAAM,GAAG,OAAO,CAAC;QAAE,MAAM,EAAE,IAAI,GAAG,MAAM,CAAC;QAAC,SAAS,EAAE,MAAM,CAAA;KAAE,CAAC;CAiB/E"}

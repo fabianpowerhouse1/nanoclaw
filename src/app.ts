@@ -1,5 +1,5 @@
 import express from 'express';
-import { MonitorService } from './services/monitor';
+import { MonitorService } from './services/monitor.js';
 
 const app = express();
 const monitorService = new MonitorService();

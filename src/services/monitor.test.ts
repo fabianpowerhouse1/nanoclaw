@@ -1,5 +1,5 @@
 import { describe, test, expect, vi } from 'vitest';
-import { MonitorService } from './monitor';
+import { MonitorService } from './monitor.js';
 
 describe('MonitorService - TDD Implementation', () => {
   test('ping(url) should return UP for a successful status 200', async () => {
