@@ -108,3 +108,44 @@ describe('V1.9.0 Routing Finality (Scorched Earth)', () => {
     );
   });
 });
+import { describe, it, expect } from 'vitest';
+import { resolvePersonaPath } from './container-runner.js';
+
+describe('V7 Persona Mapping', () => {
+  it('should resolve the default persona to super-pm.md', () => {
+    const path = resolvePersonaPath();
+    expect(path).toBe('/app/.agents/dist/super-pm.md');
+  });
+
+  it('should resolve "pm" and "product" aliases to super-pm.md', () => {
+    expect(resolvePersonaPath('pm')).toBe('/app/.agents/dist/super-pm.md');
+    expect(resolvePersonaPath('product')).toBe('/app/.agents/dist/super-pm.md');
+    expect(resolvePersonaPath('discovery')).toBe('/app/.agents/dist/super-pm.md');
+  });
+
+  it('should resolve "architect" and "design" aliases to super-architect.md', () => {
+    expect(resolvePersonaPath('architect')).toBe('/app/.agents/dist/super-architect.md');
+    expect(resolvePersonaPath('design')).toBe('/app/.agents/dist/super-architect.md');
+  });
+
+  it('should resolve "coder" and "dev" aliases to super-coder.md', () => {
+    expect(resolvePersonaPath('coder')).toBe('/app/.agents/dist/super-coder.md');
+    expect(resolvePersonaPath('dev')).toBe('/app/.agents/dist/super-coder.md');
+    expect(resolvePersonaPath('implementation')).toBe('/app/.agents/dist/super-coder.md');
+  });
+
+  it('should resolve "qa" and "verify" aliases to super-qa.md', () => {
+    expect(resolvePersonaPath('qa')).toBe('/app/.agents/dist/super-qa.md');
+    expect(resolvePersonaPath('verify')).toBe('/app/.agents/dist/super-qa.md');
+  });
+
+  it('should resolve "bar-raiser" and "antagonist" aliases to super-bar-raiser.md', () => {
+    expect(resolvePersonaPath('bar-raiser')).toBe('/app/.agents/dist/super-bar-raiser.md');
+    expect(resolvePersonaPath('antagonist')).toBe('/app/.agents/dist/super-bar-raiser.md');
+    expect(resolvePersonaPath('audit')).toBe('/app/.agents/dist/super-bar-raiser.md');
+  });
+
+  it('should fallback to super-pm.md for unknown personas', () => {
+    expect(resolvePersonaPath('unknown')).toBe('/app/.agents/dist/super-pm.md');
+  });
+});

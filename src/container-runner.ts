@@ -228,77 +228,49 @@ function readSkills(): string {
  * Maps strict aliases to persona prompt files.
  */
 export function resolvePersonaPath(personaOverride?: string): string {
-    const DEFAULT_PERSONA = 'pm.md';
+    const DEFAULT_PERSONA = 'super-pm.md';
     
     if (!personaOverride) {
-        return '/workspace/active_sessions/pilot-alpha_pm_prompt.txt';
+        return '/app/.agents/dist/super-pm.md';
     }
 
     const PERSONA_MAP: Record<string, string> = {
         // PM / Discovery
-        'pm': 'pm.md',
-        'product': 'pm.md',
-        'manager': 'pm.md',
-        'lead': 'pm.md',
-        
-        // Peer PM / Audit
-        'peer-pm': 'peer_pm.md',
-        'peer_pm': 'peer_pm.md',
-        'pm-audit': 'peer_pm.md',
-        'bar-raiser': 'peer_pm.md',
+        'pm': 'super-pm.md',
+        'product': 'super-pm.md',
+        'discovery': 'super-pm.md',
         
         // Architect / Design
-        'architect': 'architect.md',
-        'arch': 'architect.md',
-        'principal': 'architect.md',
+        'architect': 'super-architect.md',
+        'design': 'super-architect.md',
         
-        // Peer Architect / Audit
-        'peer-architect': 'peer-architect.md',
-        'peer_architect': 'peer-architect.md',
-        'arch-audit': 'peer-architect.md',
+        // Coder / Implementation
+        'coder': 'super-coder.md',
+        'dev': 'super-coder.md',
+        'implementation': 'super-coder.md',
         
-        // Developer / Implementation
-        'dev': 'tdd-coder.md',
-        'developer': 'tdd-coder.md',
-        'coder': 'tdd-coder.md',
-        'engineer': 'tdd-coder.md',
-        'implementation': 'tdd-coder.md',
+        // QA / Verification
+        'qa': 'super-qa.md',
+        'verify': 'super-qa.md',
+        'tester': 'super-qa.md',
         
-        // QA / Triage
-        'qa': 'qa-triage.md',
-        'triage': 'qa-triage.md',
-        'tester': 'qa-triage.md',
-        'bug-hunter': 'qa-triage.md',
-        
-        // SRE / Hardening
-        'sre': 'sre.md',
-        'ops': 'sre.md',
-        'reliability': 'sre.md',
-        'hardening': 'sre.md',
-        
-        // Curator / Documentation
-        'curator': 'context-curator.md',
-        'documentation': 'context-curator.md',
-        'docs': 'context-curator.md',
-        'finalizer': 'context-curator.md'
+        // Bar Raiser / Antagonist
+        'bar-raiser': 'super-bar-raiser.md',
+        'antagonist': 'super-bar-raiser.md',
+        'audit': 'super-bar-raiser.md'
     };
 
     const normalized = personaOverride.trim().toLowerCase();
     const personaFile = PERSONA_MAP[normalized];
 
     if (personaFile) {
-        // V1.8 Strict Pathing: ONLY validate internal container mount point
-        const internalPath = path.join('/app/.agents/personas', personaFile);
-        if (fs.existsSync(internalPath)) {
-            return internalPath;
-        }
-        
-        logger.warn({ personaOverride, personaFile, internalPath }, 'Persona file not found in production volume. Falling back.');
+        const internalPath = path.join('/app/.agents/dist', personaFile);
+        return internalPath;
     } else {
         logger.warn({ personaOverride }, 'Unknown persona override requested. Falling back to PM.');
     }
     
-    return `/app/.agents/personas/${DEFAULT_PERSONA}`;
+    return `/app/.agents/dist/${DEFAULT_PERSONA}`;
 }
 
 function buildContainerArgs(
