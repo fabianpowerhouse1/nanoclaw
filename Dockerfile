@@ -7,6 +7,7 @@ WORKDIR /app
 
 # Install dependencies first for better caching
 COPY package*.json ./
+RUN npm install -g @fission-ai/openspec@latest
 RUN npm install --include=dev
 
 # Copy source and compile
