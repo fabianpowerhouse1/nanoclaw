@@ -196,6 +196,16 @@ export function buildVolumeMounts(
       });
   }
 
+  // V1.5 Secure Secret Isolation
+  const githubSecretPath = '/home/ubuntu/.secrets/github.env';
+  if (fs.existsSync(githubSecretPath)) {
+      mounts.push({
+          hostPath: githubSecretPath,
+          containerPath: '/etc/github-secret.env',
+          readonly: true
+      });
+  }
+
   return mounts;
 }
 
@@ -274,7 +284,7 @@ export function resolvePersonaPath(personaOverride?: string, currentPhase: strin
 function buildContainerArgs(
   mounts: VolumeMount[],
   containerName: string,
-  input?: ContainerInput, githubToken?: string,
+  input?: ContainerInput,
   extraArgs: string[] = []
 ): string[] {
   const args: string[] = ['run', '-i', '--name', containerName];
@@ -289,11 +299,6 @@ function buildContainerArgs(
       args.push('-e', 'POWERHOUSE_DEBUG=true');
   }
 
-  if (githubToken) {
-    args.push('-e', `GH_TOKEN=${githubToken}`);
-    args.push('-e', `GITHUB_TOKEN=${githubToken}`);
-  }
-  
   const personaPath = resolvePersonaPath(input?.personaOverride, input?.projectPhase);
   
   args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=${personaPath}`);
@@ -344,32 +349,6 @@ function sanitizeContainerArgs(args: string[]): string[] {
   });
 }
 
-function getGitHubToken(): string | undefined {
-    let token: string | undefined;
-    
-    try {
-        if (fs.existsSync('/run/secrets/github_token')) {
-            token = fs.readFileSync('/run/secrets/github_token', 'utf8').trim();
-        }
-    } catch (e) {}
-
-    if (token) return token;
-
-    token = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT || process.env.GH_TOKEN;
-    if (token) return token;
-
-    try {
-        const secretPath = '/home/ubuntu/.secrets/github.env';
-        if (fs.existsSync(secretPath)) {
-            const content = fs.readFileSync(secretPath, 'utf8');
-            const match = content.match(/GITHUB_PAT=([^\s]+)/) || content.match(/GITHUB_TOKEN=([^\s]+)/);
-            if (match) token = match[1];
-        }
-    } catch (e) {}
-
-    return token;
-}
-
 export async function runContainerAgent(
   group: RegisteredGroup,
   input: ContainerInput,
@@ -380,8 +359,6 @@ export async function runContainerAgent(
   const startTime = Date.now();
   const groupDir = resolveGroupFolderPath(group.folder);
   ensureWritableDir(groupDir);
-
-  const githubToken = getGitHubToken();
 
   let ephemeralHomePath: string | undefined;
   if (input.isIsolated) {
@@ -424,7 +401,7 @@ export async function runContainerAgent(
   const mounts = buildVolumeMounts(group, input, ephemeralHomePath);
   const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
   const containerName = `nanoclaw-agent-${safeName}-${Date.now()}`;
-  const containerArgs = buildContainerArgs(mounts, containerName, input, githubToken, extraArgs);
+  const containerArgs = buildContainerArgs(mounts, containerName, input, extraArgs);
   
   logger.info({ 
     group: group.name, 
