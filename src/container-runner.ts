@@ -51,6 +51,7 @@ export interface ContainerInput {
   isIsolated?: boolean; // Branch flag
   projectPath?: string; // Target project sub-folder
   personaOverride?: string; // PATCH: Dynamic Persona
+  projectPhase?: string; // V7 SDLC Phase
 }
 
 export interface ContainerOutput {
@@ -225,52 +226,49 @@ function readSkills(): string {
 
 /**
  * Deterministic Persona Resolution (V1.3)
- * Maps strict aliases to persona prompt files.
+ * Maps strict aliases to persona prompt files via persona-manifest.json.
+ * Enforces Phase-Lock authority.
  */
-export function resolvePersonaPath(personaOverride?: string): string {
+export function resolvePersonaPath(personaOverride?: string, currentPhase: string = 'DISCOVERY'): string {
     const DEFAULT_PERSONA = 'super-pm.md';
+    const manifestPath = '/app/.agents/persona-manifest.json';
+    const distDir = '/app/.agents/dist';
     
-    if (!personaOverride) {
-        return '/app/.agents/dist/super-pm.md';
-    }
+    try {
+        if (fs.existsSync(manifestPath)) {
+            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+            const normalized = (personaOverride || '').trim().toLowerCase();
+            const phase = currentPhase.toUpperCase();
+            
+            // PHASE-DEFAULT LOGIC
+            let resolvedKey = manifest.phase_defaults[phase] || manifest.default_persona;
 
-    const PERSONA_MAP: Record<string, string> = {
-        // PM / Discovery
-        'pm': 'super-pm.md',
-        'product': 'super-pm.md',
-        'discovery': 'super-pm.md',
-        
-        // Architect / Design
-        'architect': 'super-architect.md',
-        'design': 'super-architect.md',
-        
-        // Coder / Implementation
-        'coder': 'super-coder.md',
-        'dev': 'super-coder.md',
-        'implementation': 'super-coder.md',
-        
-        // QA / Verification
-        'qa': 'super-qa.md',
-        'verify': 'super-qa.md',
-        'tester': 'super-qa.md',
-        
-        // Bar Raiser / Antagonist
-        'bar-raiser': 'super-bar-raiser.md',
-        'antagonist': 'super-bar-raiser.md',
-        'audit': 'super-bar-raiser.md'
-    };
+            // EXPLICIT ROLE OVERRIDE
+            if (normalized && normalized !== 'default') {
+                const found = Object.entries(manifest.personas).find(([key, config]: [string, any]) => 
+                    key === normalized || (config.aliases && config.aliases.includes(normalized))
+                );
 
-    const normalized = personaOverride.trim().toLowerCase();
-    const personaFile = PERSONA_MAP[normalized];
+                if (found) {
+                    const config = found[1] as any;
+                    // AUTHORITY CHECK (V7 Phase-Lock)
+                    if (config.authority && config.authority.includes(phase)) {
+                        resolvedKey = found[0];
+                    } else {
+                        logger.warn({ personaOverride, phase }, 'Persona not authorized for phase. Using default.');
+                    }
+                } else {
+                    logger.warn({ personaOverride }, 'Unknown persona requested. Using default.');
+                }
+            }
 
-    if (personaFile) {
-        const internalPath = path.join('/app/.agents/dist', personaFile);
-        return internalPath;
-    } else {
-        logger.warn({ personaOverride }, 'Unknown persona override requested. Falling back to PM.');
+            return path.join(distDir, manifest.personas[resolvedKey].target);
+        }
+    } catch (e) {
+        logger.error({ err: e }, 'Failed to resolve persona via manifest. Falling back to super-pm.md');
     }
     
-    return `/app/.agents/dist/${DEFAULT_PERSONA}`;
+    return path.join(distDir, DEFAULT_PERSONA);
 }
 
 function buildContainerArgs(
@@ -296,10 +294,11 @@ function buildContainerArgs(
     args.push('-e', `GITHUB_TOKEN=${githubToken}`);
   }
   
-  const personaPath = resolvePersonaPath(input?.personaOverride);
+  const personaPath = resolvePersonaPath(input?.personaOverride, input?.projectPhase);
   
   args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=${personaPath}`);
   args.push('-e', 'ISOLATED_WORKSPACE=true');
+  args.push('-e', `CURRENT_PHASE=${(input?.projectPhase || 'DISCOVERY').toUpperCase()}`);
 
   args.push('-e', `TZ=${TIMEZONE}`);
   args.push('-e', `LLM_TIMEOUT_MS=${process.env.LLM_TIMEOUT_MS || '1200000'}`);

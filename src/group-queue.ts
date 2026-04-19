@@ -56,6 +56,21 @@ export class GroupQueue {
     return state;
   }
 
+  getActiveContainers() {
+    const active = [];
+    for (const [jid, state] of this.groups.entries()) {
+      if (state.active || state.isAsyncActive) {
+        active.push({
+          jid,
+          containerName: state.containerName,
+          groupFolder: state.groupFolder,
+          isAsync: state.isAsyncActive
+        });
+      }
+    }
+    return active;
+  }
+
   setProcessMessagesFn(fn: (groupJid: string, messages: NewMessage[]) => Promise<boolean>): void {
     this.processMessagesFn = fn;
   }

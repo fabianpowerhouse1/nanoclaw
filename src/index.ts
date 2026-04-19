@@ -17,7 +17,7 @@ import {
 } from './config.js';
 import { WhatsAppChannel } from './channels/whatsapp.js';
 import { TelegramChannel } from './channels/telegram.js';
-import app from './app.js';
+import { createApp } from './app.js';
 import {
   ContainerOutput,
   runContainerAgent,
@@ -140,6 +140,7 @@ export async function processGroupMessages(chatJid: string, messages: NewMessage
   let isIsolated = false;
   let projectPath = '';
   let personaOverride = '';
+  let projectPhase = '';
   let group: RegisteredGroup | undefined;
 
   if (chatJid.startsWith('internal:')) {
@@ -161,11 +162,13 @@ export async function processGroupMessages(chatJid: string, messages: NewMessage
   
   const projectMatch = firstMsg.match(/(?:^|\s)project\s+([^\s\[]+)/i);
   const roleMatch = firstMsg.match(/\[ROLE:\s*([^\]]+)\]/i);
+  const phaseMatch = firstMsg.match(/\[PHASE:\s*([^\]]+)\]/i);
   
   if (projectMatch) {
     isIsolated = true;
     projectPath = projectMatch[1];
     if (roleMatch) personaOverride = roleMatch[1].trim();
+    if (phaseMatch) projectPhase = phaseMatch[1].trim();
   }
   
   const sanitizedMessages = validMessages.map(m => ({
@@ -180,7 +183,7 @@ export async function processGroupMessages(chatJid: string, messages: NewMessage
   if (isIsolated) {
       runContainerAgent(
         group,
-        { prompt, groupFolder: group.folder, chatJid, isMain: group.folder === MAIN_GROUP_FOLDER, assistantName: ASSISTANT_NAME, isIsolated: true, projectPath, personaOverride },
+        { prompt, groupFolder: group.folder, chatJid, isMain: group.folder === MAIN_GROUP_FOLDER, assistantName: ASSISTANT_NAME, isIsolated: true, projectPath, personaOverride, projectPhase },
         (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder),
         async (result) => {
           if (result.result) {
@@ -216,6 +219,7 @@ async function startMessageLoop(): Promise<void> {
 }
 
 function startInternalBridge(): void {
+  const app = createApp(queue);
   app.listen(3000, '0.0.0.0', () => {
     logger.info('Internal HealthCheck Bridge running on port 3000');
   });
