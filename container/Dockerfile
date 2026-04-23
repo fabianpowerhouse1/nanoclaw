@@ -23,7 +23,11 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    golang \
     && rm -rf /var/lib/apt/lists/*
+
+# Verify Go installation
+RUN go version
 
 # Install GitHub CLI (gh)
 RUN mkdir -p -m 755 /etc/apt/keyrings && \

@@ -59,6 +59,7 @@ A personal Claude assistant accessible via WhatsApp, with persistent memory per 
 │  │                                                                │   │
 │  │  Tools (all groups):                                           │   │
 │  │    • Bash (safe - sandboxed in container!)                     │   │
+│  │    • Go Runtime (for testing and implementation)               │   │
 │  │    • Read, Write, Edit, Glob, Grep (file operations)           │   │
 │  │    • WebSearch, WebFetch (internet access)                     │   │
 │  │    • agent-browser (browser automation)                        │   │
@@ -76,6 +77,7 @@ A personal Claude assistant accessible via WhatsApp, with persistent memory per 
 | WhatsApp Connection | Node.js (@whiskeysockets/baileys) | Connect to WhatsApp, send/receive messages |
 | Message Storage | SQLite (better-sqlite3) | Store messages for polling |
 | Container Runtime | Containers (Linux VMs) | Isolated environments for agent execution |
+| Go Runtime | Go (golang) | Support for testing and implementation within agents |
 | Agent | @anthropic-ai/claude-agent-sdk (0.2.29) | Run Claude with tools and MCP servers |
 | Browser Automation | agent-browser + Chromium | Web interaction and screenshots |
 | Runtime | Node.js 20+ | Host process for routing and scheduling |
