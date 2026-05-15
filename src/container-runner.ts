@@ -209,31 +209,6 @@ export function buildVolumeMounts(
   return mounts;
 }
 
-function readSecrets(): Record<string, string> {
-  const secrets = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
-  if (SKILL_SERVICE_PSK) secrets.SKILL_SERVICE_PSK = SKILL_SERVICE_PSK;
-  return secrets;
-}
-
-/**
- * Dynamically read available skill names and inject JIT instructions
- * Strategy B (Lazy-Loading) implemented in V0.7
- */
-function readSkills(): string {
-  try {
-    if (!fs.existsSync(SKILLS_DIR)) return '';
-    const skillFolders = fs.readdirSync(SKILLS_DIR).filter(f => 
-      fs.statSync(path.join(SKILLS_DIR, f)).isDirectory()
-    );
-    if (skillFolders.length === 0) return '';
-    
-    return `\n\nSystem Note: Specialized tools are mounted in /app/skills/. Available tools: [${skillFolders.join(', ')}]. If your task requires one of these tools, you MUST first read its documentation at /app/skills/<tool_name>/skill.md using your file reading tool.\n`;
-  } catch (err) {
-    logger.warn('Failed to read platform skills directory');
-    return '';
-  }
-}
-
 /**
  * Deterministic Persona Resolution (V1.3)
  * Maps strict aliases to persona prompt files via persona-manifest.json.
@@ -413,10 +388,6 @@ export async function runContainerAgent(
   const logsDir = path.join(groupDir, 'logs');
   ensureWritableDir(logsDir);
 
-  if (input.isIsolated) {
-      input.prompt += readSkills();
-  }
-
   return new Promise((resolve) => {
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
     onProcess(container, containerName);
@@ -426,11 +397,9 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    input.secrets = readSecrets();
     input.provider = PROVIDER;
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
-    delete input.secrets;
 
     let parseBuffer = '';
     let newSessionId: string | undefined;
