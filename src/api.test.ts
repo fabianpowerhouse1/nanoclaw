@@ -1,6 +1,9 @@
 import { describe, test, expect, vi } from 'vitest';
 import request from 'supertest';
-import app from './app.js';
+import { createApp } from './app.js';
+import { GroupQueue } from './group-queue.js';
+
+const app = createApp({ getActiveContainers: () => [] } as unknown as GroupQueue);
 
 describe('API Layer - Monitor Routing', () => {
   test('GET /api/monitor should return 200 with status and latency', async () => {

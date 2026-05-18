@@ -1,8 +1,7 @@
 import { exec, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
-import { CONTAINER_IMAGE, CONTAINER_MAX_OUTPUT_SIZE, DATA_DIR, TIMEZONE, HOST_PROJECT_PATH, PROVIDER, GEMINI_SESSION_PATH, SKILL_SERVICE_URL, SKILL_SERVICE_PSK, } from './config.js';
-import { readEnvFile } from './env.js';
+import { CONTAINER_IMAGE, CONTAINER_MAX_OUTPUT_SIZE, DATA_DIR, TIMEZONE, HOST_PROJECT_PATH, PROVIDER, GEMINI_SESSION_PATH, SKILL_SERVICE_URL, } from './config.js';
 import { resolveGroupFolderPath, resolveGroupIpcPath } from './group-folder.js';
 import { logger } from './logger.js';
 import { CONTAINER_RUNTIME_BIN, readonlyMountArgs } from './container-runtime.js';
@@ -128,98 +127,23 @@ export function buildVolumeMounts(group, input, ephemeralHomePath) {
             readonly: true
         });
     }
+    // V1.5 Secure Secret Isolation
+    const githubSecretPath = '/home/ubuntu/.secrets/github.env';
+    if (fs.existsSync(githubSecretPath)) {
+        mounts.push({
+            hostPath: githubSecretPath,
+            containerPath: '/etc/github-secret.env',
+            readonly: true
+        });
+    }
     return mounts;
-}
-function readSecrets() {
-    const secrets = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
-    if (SKILL_SERVICE_PSK)
-        secrets.SKILL_SERVICE_PSK = SKILL_SERVICE_PSK;
-    return secrets;
-}
-/**
- * Dynamically read available skill names and inject JIT instructions
- * Strategy B (Lazy-Loading) implemented in V0.7
- */
-function readSkills() {
-    try {
-        if (!fs.existsSync(SKILLS_DIR))
-            return '';
-        const skillFolders = fs.readdirSync(SKILLS_DIR).filter(f => fs.statSync(path.join(SKILLS_DIR, f)).isDirectory());
-        if (skillFolders.length === 0)
-            return '';
-        return `\n\nSystem Note: Specialized tools are mounted in /app/skills/. Available tools: [${skillFolders.join(', ')}]. If your task requires one of these tools, you MUST first read its documentation at /app/skills/<tool_name>/skill.md using your file reading tool.\n`;
-    }
-    catch (err) {
-        logger.warn('Failed to read platform skills directory');
-        return '';
-    }
 }
 /**
  * Deterministic Persona Resolution (V1.3)
- * Maps strict aliases to persona prompt files.
+ * Maps strict aliases to persona prompt files via persona-manifest.json.
+ * Enforces Phase-Lock authority.
  */
-export function resolvePersonaPath(personaOverride) {
-    const DEFAULT_PERSONA = 'pm.md';
-    if (!personaOverride) {
-        return '/workspace/active_sessions/pilot-alpha_pm_prompt.txt';
-    }
-    const PERSONA_MAP = {
-        // PM / Discovery
-        'pm': 'pm.md',
-        'product': 'pm.md',
-        'manager': 'pm.md',
-        'lead': 'pm.md',
-        // Peer PM / Audit
-        'peer-pm': 'peer_pm.md',
-        'peer_pm': 'peer_pm.md',
-        'pm-audit': 'peer_pm.md',
-        'bar-raiser': 'peer_pm.md',
-        // Architect / Design
-        'architect': 'architect.md',
-        'arch': 'architect.md',
-        'principal': 'architect.md',
-        // Peer Architect / Audit
-        'peer-architect': 'peer-architect.md',
-        'peer_architect': 'peer-architect.md',
-        'arch-audit': 'peer-architect.md',
-        // Developer / Implementation
-        'dev': 'tdd-coder.md',
-        'developer': 'tdd-coder.md',
-        'coder': 'tdd-coder.md',
-        'engineer': 'tdd-coder.md',
-        'implementation': 'tdd-coder.md',
-        // QA / Triage
-        'qa': 'qa-triage.md',
-        'triage': 'qa-triage.md',
-        'tester': 'qa-triage.md',
-        'bug-hunter': 'qa-triage.md',
-        // SRE / Hardening
-        'sre': 'sre.md',
-        'ops': 'sre.md',
-        'reliability': 'sre.md',
-        'hardening': 'sre.md',
-        // Curator / Documentation
-        'curator': 'context-curator.md',
-        'documentation': 'context-curator.md',
-        'docs': 'context-curator.md',
-        'finalizer': 'context-curator.md'
-    };
-    const normalized = personaOverride.trim().toLowerCase();
-    const personaFile = PERSONA_MAP[normalized];
-    if (personaFile) {
-        // V1.8 Strict Pathing: ONLY validate internal container mount point
-        const internalPath = path.join('/app/.agents/personas', personaFile);
-        if (fs.existsSync(internalPath)) {
-            return internalPath;
-        }
-        logger.warn({ personaOverride, personaFile, internalPath }, 'Persona file not found in production volume. Falling back.');
-    }
-    else {
-        logger.warn({ personaOverride }, 'Unknown persona override requested. Falling back to PM.');
-    }
-    return `/app/.agents/personas/${DEFAULT_PERSONA}`;
-}
-function buildContainerArgs(mounts, containerName, input, githubToken, extraArgs = []) {
+function buildContainerArgs(mounts, containerName, input, extraArgs = []) {
     const args = ['run', '-i', '--name', containerName];
     // V6 ENTRYPOINT OVERRIDE
     args.push('--entrypoint', '/usr/local/bin/agent-init.sh');
@@ -228,15 +152,14 @@ function buildContainerArgs(mounts, containerName, input, githubToken, extraArgs
     if (process.env.POWERHOUSE_DEBUG === 'true') {
         args.push('-e', 'POWERHOUSE_DEBUG=true');
     }
-    if (githubToken) {
-        args.push('-e', `GH_TOKEN=${githubToken}`);
-        args.push('-e', `GITHUB_TOKEN=${githubToken}`);
+    // Pass persona intent directly to the Agent Harness
+    if (input?.personaOverride) {
+        args.push('-e', `AGENT_PERSONA=${input.personaOverride.toLowerCase()}`);
     }
-    const personaPath = resolvePersonaPath(input?.personaOverride);
-    args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=${personaPath}`);
     args.push('-e', 'ISOLATED_WORKSPACE=true');
+    args.push('-e', `CURRENT_PHASE=${(input?.projectPhase || 'DISCOVERY').toUpperCase()}`);
     args.push('-e', `TZ=${TIMEZONE}`);
-    args.push('-e', `LLM_TIMEOUT_MS=${process.env.LLM_TIMEOUT_MS || '600000'}`);
+    args.push('-e', `LLM_TIMEOUT_MS=${process.env.LLM_TIMEOUT_MS || '1200000'}`);
     args.push('-e', `LLM_MODEL=${process.env.LLM_MODEL || ''}`);
     if (SKILL_SERVICE_URL) {
         args.push('-e', `SKILL_SERVICE_URL=${SKILL_SERVICE_URL}`);
@@ -248,7 +171,6 @@ function buildContainerArgs(mounts, containerName, input, githubToken, extraArgs
     const hostGid = process.getgid?.();
     // ENV INJECTION FOR AGENT-INIT.SH
     args.push('-e', 'ACTIVE_WORKSPACE_PATH=/workspace');
-    args.push('-e', `INJECTED_PROMPT_PATH=${personaPath}`);
     args.push("--workdir", "/workspace");
     args.push('--cap-drop=ALL');
     args.push('--security-opt', 'no-new-privileges');
@@ -276,36 +198,10 @@ function sanitizeContainerArgs(args) {
         return arg;
     });
 }
-function getGitHubToken() {
-    let token;
-    try {
-        if (fs.existsSync('/run/secrets/github_token')) {
-            token = fs.readFileSync('/run/secrets/github_token', 'utf8').trim();
-        }
-    }
-    catch (e) { }
-    if (token)
-        return token;
-    token = process.env.GITHUB_TOKEN || process.env.GITHUB_PAT || process.env.GH_TOKEN;
-    if (token)
-        return token;
-    try {
-        const secretPath = '/home/ubuntu/.secrets/github.env';
-        if (fs.existsSync(secretPath)) {
-            const content = fs.readFileSync(secretPath, 'utf8');
-            const match = content.match(/GITHUB_PAT=([^\s]+)/) || content.match(/GITHUB_TOKEN=([^\s]+)/);
-            if (match)
-                token = match[1];
-        }
-    }
-    catch (e) { }
-    return token;
-}
 export async function runContainerAgent(group, input, onProcess, onOutput, extraArgs = []) {
     const startTime = Date.now();
     const groupDir = resolveGroupFolderPath(group.folder);
     ensureWritableDir(groupDir);
-    const githubToken = getGitHubToken();
     let ephemeralHomePath;
     if (input.isIsolated) {
         const tmpDir = path.join(DATA_DIR, 'tmp');
@@ -344,7 +240,7 @@ export async function runContainerAgent(group, input, onProcess, onOutput, extra
     const mounts = buildVolumeMounts(group, input, ephemeralHomePath);
     const safeName = group.folder.replace(/[^a-zA-Z0-9-]/g, '-');
     const containerName = `nanoclaw-agent-${safeName}-${Date.now()}`;
-    const containerArgs = buildContainerArgs(mounts, containerName, input, githubToken, extraArgs);
+    const containerArgs = buildContainerArgs(mounts, containerName, input, extraArgs);
     logger.info({
         group: group.name,
         containerName,
@@ -353,9 +249,6 @@ export async function runContainerAgent(group, input, onProcess, onOutput, extra
     }, 'Spawning container agent');
     const logsDir = path.join(groupDir, 'logs');
     ensureWritableDir(logsDir);
-    if (input.isIsolated) {
-        input.prompt += readSkills();
-    }
     return new Promise((resolve) => {
         const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
         onProcess(container, containerName);
@@ -363,11 +256,9 @@ export async function runContainerAgent(group, input, onProcess, onOutput, extra
         let stderr = '';
         let stdoutTruncated = false;
         let stderrTruncated = false;
-        input.secrets = readSecrets();
         input.provider = PROVIDER;
         container.stdin.write(JSON.stringify(input));
         container.stdin.end();
-        delete input.secrets;
         let parseBuffer = '';
         let newSessionId;
         let outputChain = Promise.resolve();
@@ -423,7 +314,7 @@ export async function runContainerAgent(group, input, onProcess, onOutput, extra
             }
         });
         let timedOut = false;
-        const timeoutMs = Number(process.env.CONTAINER_TTL_MS) || 600000;
+        const timeoutMs = Number(process.env.CONTAINER_TTL_MS) || 1200000;
         const killOnTimeout = () => {
             timedOut = true;
             exec(`docker stop -t 1 ${containerName}`, { timeout: 15000 }, (err) => {
@@ -441,7 +332,7 @@ export async function runContainerAgent(group, input, onProcess, onOutput, extra
                     resolve({
                         status: 'error',
                         result: null,
-                        error: `[SYSTEM_FATAL] Execution Timeout: ${Number(process.env.CONTAINER_TTL_MS) || 600000}ms limit reached`,
+                        error: `[SYSTEM_FATAL] Execution Timeout: ${Number(process.env.CONTAINER_TTL_MS) || 1200000}ms limit reached`,
                         isFatal: true
                     });
                     return;

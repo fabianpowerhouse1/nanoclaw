@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'vitest';
 import request from 'supertest';
-import app from './app.js';
+import { createApp } from './app.js';
+const app = createApp({ getActiveContainers: () => [] });
 describe('API Layer - Monitor Routing', () => {
     test('GET /api/monitor should return 200 with status and latency', async () => {
         const res = await request(app).get('/api/monitor?url=https://example.com');

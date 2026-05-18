@@ -1,5 +1,5 @@
 # NanoClaw Agent Container
-# Optimized V8.3 Zero-Trust Agent (Harness-Mandatory)
+# Optimized V8.4.1 Zero-Trust Agent (Harness-Mandatory)
 
 FROM node:22-slim
 

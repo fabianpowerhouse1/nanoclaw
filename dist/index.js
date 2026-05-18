@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { ASSISTANT_NAME, MAIN_GROUP_FOLDER, POLL_INTERVAL, } from './config.js';
-import app from './app.js';
+import { createApp } from './app.js';
 import { runContainerAgent, } from './container-runner.js';
 import { ensureContainerRuntimeRunning } from './container-runtime.js';
 import { getAllChats, getAllRegisteredGroups, getAllSessions, getNewMessages, getRouterState, initDatabase, setRegisteredGroup, setRouterState, } from './db.js';
@@ -78,6 +78,7 @@ export async function processGroupMessages(chatJid, messages) {
     let isIsolated = false;
     let projectPath = '';
     let personaOverride = '';
+    let projectPhase = '';
     let group;
     if (chatJid.startsWith('internal:')) {
         isIsolated = false;
@@ -96,11 +97,14 @@ export async function processGroupMessages(chatJid, messages) {
     const firstMsg = validMessages[0].content;
     const projectMatch = firstMsg.match(/(?:^|\s)project\s+([^\s\[]+)/i);
     const roleMatch = firstMsg.match(/\[ROLE:\s*([^\]]+)\]/i);
+    const phaseMatch = firstMsg.match(/\[PHASE:\s*([^\]]+)\]/i);
     if (projectMatch) {
         isIsolated = true;
         projectPath = projectMatch[1];
         if (roleMatch)
             personaOverride = roleMatch[1].trim();
+        if (phaseMatch)
+            projectPhase = phaseMatch[1].trim();
     }
     const sanitizedMessages = validMessages.map(m => ({
         ...m,
@@ -111,7 +115,7 @@ export async function processGroupMessages(chatJid, messages) {
     if (!channel && !chatJid.startsWith('internal:'))
         return true;
     if (isIsolated) {
-        runContainerAgent(group, { prompt, groupFolder: group.folder, chatJid, isMain: group.folder === MAIN_GROUP_FOLDER, assistantName: ASSISTANT_NAME, isIsolated: true, projectPath, personaOverride }, (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder), async (result) => {
+        runContainerAgent(group, { prompt, groupFolder: group.folder, chatJid, isMain: group.folder === MAIN_GROUP_FOLDER, assistantName: ASSISTANT_NAME, isIsolated: true, projectPath, personaOverride, projectPhase }, (proc, containerName) => queue.registerProcess(chatJid, proc, containerName, group.folder), async (result) => {
             if (result.result) {
                 const text = String(result.result).replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
                 if (text)
@@ -147,6 +151,7 @@ async function startMessageLoop() {
     }
 }
 function startInternalBridge() {
+    const app = createApp(queue);
     app.listen(3000, '0.0.0.0', () => {
         logger.info('Internal HealthCheck Bridge running on port 3000');
     });

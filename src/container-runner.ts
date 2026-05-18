@@ -214,47 +214,6 @@ export function buildVolumeMounts(
  * Maps strict aliases to persona prompt files via persona-manifest.json.
  * Enforces Phase-Lock authority.
  */
-export function resolvePersonaPath(personaOverride?: string, currentPhase: string = 'DISCOVERY'): string {
-    const DEFAULT_PERSONA = 'super-pm.md';
-    const manifestPath = '/app/.agents/persona-manifest.json';
-    const distDir = '/app/.agents/dist';
-    
-    try {
-        if (fs.existsSync(manifestPath)) {
-            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-            const normalized = (personaOverride || '').trim().toLowerCase();
-            const phase = currentPhase.toUpperCase();
-            
-            // PHASE-DEFAULT LOGIC
-            let resolvedKey = manifest.phase_defaults[phase] || manifest.default_persona;
-
-            // EXPLICIT ROLE OVERRIDE
-            if (normalized && normalized !== 'default') {
-                const found = Object.entries(manifest.personas).find(([key, config]: [string, any]) => 
-                    key === normalized || (config.aliases && config.aliases.includes(normalized))
-                );
-
-                if (found) {
-                    const config = found[1] as any;
-                    // AUTHORITY CHECK (V7 Phase-Lock)
-                    if (config.authority && config.authority.includes(phase)) {
-                        resolvedKey = found[0];
-                    } else {
-                        logger.warn({ personaOverride, phase }, 'Persona not authorized for phase. Using default.');
-                    }
-                } else {
-                    logger.warn({ personaOverride }, 'Unknown persona requested. Using default.');
-                }
-            }
-
-            return path.join(distDir, manifest.personas[resolvedKey].target);
-        }
-    } catch (e) {
-        logger.error({ err: e }, 'Failed to resolve persona via manifest. Falling back to super-pm.md');
-    }
-    
-    return path.join(distDir, DEFAULT_PERSONA);
-}
 
 function buildContainerArgs(
   mounts: VolumeMount[],
@@ -274,9 +233,11 @@ function buildContainerArgs(
       args.push('-e', 'POWERHOUSE_DEBUG=true');
   }
 
-  const personaPath = resolvePersonaPath(input?.personaOverride, input?.projectPhase);
+  // Pass persona intent directly to the Agent Harness
+  if (input?.personaOverride) {
+      args.push('-e', `AGENT_PERSONA=${input.personaOverride.toLowerCase()}`);
+  }
   
-  args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=${personaPath}`);
   args.push('-e', 'ISOLATED_WORKSPACE=true');
   args.push('-e', `CURRENT_PHASE=${(input?.projectPhase || 'DISCOVERY').toUpperCase()}`);
 
@@ -294,7 +255,6 @@ function buildContainerArgs(
 
   // ENV INJECTION FOR AGENT-INIT.SH
   args.push('-e', 'ACTIVE_WORKSPACE_PATH=/workspace');
-  args.push('-e', `INJECTED_PROMPT_PATH=${personaPath}`);
 
   args.push("--workdir", "/workspace");
   args.push('--cap-drop=ALL');
