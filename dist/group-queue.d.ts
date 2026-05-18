@@ -7,6 +7,12 @@ export declare class GroupQueue {
     private processMessagesFn;
     private shuttingDown;
     private getGroup;
+    getActiveContainers(): {
+        jid: string;
+        containerName: string | null;
+        groupFolder: string | null;
+        isAsync: boolean;
+    }[];
     setProcessMessagesFn(fn: (groupJid: string, messages: NewMessage[]) => Promise<boolean>): void;
     markAsyncActive(groupJid: string, isActive: boolean): void;
     enqueueMessageCheck(groupJid: string, messages?: NewMessage[]): void;

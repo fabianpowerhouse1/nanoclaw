@@ -13,6 +13,7 @@ export interface ContainerInput {
     isIsolated?: boolean;
     projectPath?: string;
     personaOverride?: string;
+    projectPhase?: string;
 }
 export interface ContainerOutput {
     status: 'success' | 'error';
@@ -27,11 +28,6 @@ export interface VolumeMount {
     readonly: boolean;
 }
 export declare function buildVolumeMounts(group: RegisteredGroup, input: ContainerInput, ephemeralHomePath?: string): VolumeMount[];
-/**
- * Deterministic Persona Resolution (V1.3)
- * Maps strict aliases to persona prompt files.
- */
-export declare function resolvePersonaPath(personaOverride?: string): string;
 export declare function runContainerAgent(group: RegisteredGroup, input: ContainerInput, onProcess: (proc: ChildProcess, containerName: string) => void, onOutput?: (output: ContainerOutput) => Promise<void>, extraArgs?: string[]): Promise<ContainerOutput>;
 export declare function writeTasksSnapshot(groupFolder: string, isMain: boolean, tasks: any[]): void;
 export interface AvailableGroup {

@@ -209,77 +209,11 @@ export function buildVolumeMounts(
   return mounts;
 }
 
-function readSecrets(): Record<string, string> {
-  const secrets = readEnvFile(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
-  if (SKILL_SERVICE_PSK) secrets.SKILL_SERVICE_PSK = SKILL_SERVICE_PSK;
-  return secrets;
-}
-
-/**
- * Dynamically read available skill names and inject JIT instructions
- * Strategy B (Lazy-Loading) implemented in V0.7
- */
-function readSkills(): string {
-  try {
-    if (!fs.existsSync(SKILLS_DIR)) return '';
-    const skillFolders = fs.readdirSync(SKILLS_DIR).filter(f => 
-      fs.statSync(path.join(SKILLS_DIR, f)).isDirectory()
-    );
-    if (skillFolders.length === 0) return '';
-    
-    return `\n\nSystem Note: Specialized tools are mounted in /app/skills/. Available tools: [${skillFolders.join(', ')}]. If your task requires one of these tools, you MUST first read its documentation at /app/skills/<tool_name>/skill.md using your file reading tool.\n`;
-  } catch (err) {
-    logger.warn('Failed to read platform skills directory');
-    return '';
-  }
-}
-
 /**
  * Deterministic Persona Resolution (V1.3)
  * Maps strict aliases to persona prompt files via persona-manifest.json.
  * Enforces Phase-Lock authority.
  */
-export function resolvePersonaPath(personaOverride?: string, currentPhase: string = 'DISCOVERY'): string {
-    const DEFAULT_PERSONA = 'super-pm.md';
-    const manifestPath = '/app/.agents/persona-manifest.json';
-    const distDir = '/app/.agents/dist';
-    
-    try {
-        if (fs.existsSync(manifestPath)) {
-            const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-            const normalized = (personaOverride || '').trim().toLowerCase();
-            const phase = currentPhase.toUpperCase();
-            
-            // PHASE-DEFAULT LOGIC
-            let resolvedKey = manifest.phase_defaults[phase] || manifest.default_persona;
-
-            // EXPLICIT ROLE OVERRIDE
-            if (normalized && normalized !== 'default') {
-                const found = Object.entries(manifest.personas).find(([key, config]: [string, any]) => 
-                    key === normalized || (config.aliases && config.aliases.includes(normalized))
-                );
-
-                if (found) {
-                    const config = found[1] as any;
-                    // AUTHORITY CHECK (V7 Phase-Lock)
-                    if (config.authority && config.authority.includes(phase)) {
-                        resolvedKey = found[0];
-                    } else {
-                        logger.warn({ personaOverride, phase }, 'Persona not authorized for phase. Using default.');
-                    }
-                } else {
-                    logger.warn({ personaOverride }, 'Unknown persona requested. Using default.');
-                }
-            }
-
-            return path.join(distDir, manifest.personas[resolvedKey].target);
-        }
-    } catch (e) {
-        logger.error({ err: e }, 'Failed to resolve persona via manifest. Falling back to super-pm.md');
-    }
-    
-    return path.join(distDir, DEFAULT_PERSONA);
-}
 
 function buildContainerArgs(
   mounts: VolumeMount[],
@@ -299,9 +233,11 @@ function buildContainerArgs(
       args.push('-e', 'POWERHOUSE_DEBUG=true');
   }
 
-  const personaPath = resolvePersonaPath(input?.personaOverride, input?.projectPhase);
+  // Pass persona intent directly to the Agent Harness
+  if (input?.personaOverride) {
+      args.push('-e', `AGENT_PERSONA=${input.personaOverride.toLowerCase()}`);
+  }
   
-  args.push('-e', `DEFAULT_SYSTEM_PROMPT_PATH=${personaPath}`);
   args.push('-e', 'ISOLATED_WORKSPACE=true');
   args.push('-e', `CURRENT_PHASE=${(input?.projectPhase || 'DISCOVERY').toUpperCase()}`);
 
@@ -319,7 +255,6 @@ function buildContainerArgs(
 
   // ENV INJECTION FOR AGENT-INIT.SH
   args.push('-e', 'ACTIVE_WORKSPACE_PATH=/workspace');
-  args.push('-e', `INJECTED_PROMPT_PATH=${personaPath}`);
 
   args.push("--workdir", "/workspace");
   args.push('--cap-drop=ALL');
@@ -413,10 +348,6 @@ export async function runContainerAgent(
   const logsDir = path.join(groupDir, 'logs');
   ensureWritableDir(logsDir);
 
-  if (input.isIsolated) {
-      input.prompt += readSkills();
-  }
-
   return new Promise((resolve) => {
     const container = spawn(CONTAINER_RUNTIME_BIN, containerArgs, { stdio: ['pipe', 'pipe', 'pipe'] });
     onProcess(container, containerName);
@@ -426,11 +357,9 @@ export async function runContainerAgent(
     let stdoutTruncated = false;
     let stderrTruncated = false;
 
-    input.secrets = readSecrets();
     input.provider = PROVIDER;
     container.stdin.write(JSON.stringify(input));
     container.stdin.end();
-    delete input.secrets;
 
     let parseBuffer = '';
     let newSessionId: string | undefined;

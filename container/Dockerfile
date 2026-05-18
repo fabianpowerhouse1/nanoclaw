@@ -1,5 +1,5 @@
 # NanoClaw Agent Container
-# Runs Claude Agent SDK or Gemini CLI in isolated Linux VM
+# Optimized V8.4.1 Zero-Trust Agent (Harness-Mandatory)
 
 FROM node:22-slim
 
@@ -29,15 +29,6 @@ RUN apt-get update && apt-get install -y \
 # Verify Go installation
 RUN go version
 
-# Install GitHub CLI (gh)
-RUN mkdir -p -m 755 /etc/apt/keyrings && \
-    mkdir -p /etc/apt/apt.list.d && \
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null && \
-    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg && \
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/apt.list.d/github-cli.list > /dev/null && \
-    apt-get update && \
-    apt-get install -y gh
-
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
@@ -47,23 +38,6 @@ RUN npm install -g agent-browser @anthropic-ai/claude-code @google/gemini-cli @f
 
 # Create app directory
 WORKDIR /app
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
-
-# Copy package files first for better caching
-COPY agent-runner/package*.json ./
-
-# Install dependencies
-RUN npm install
-
-# Copy source code
-COPY agent-runner/ ./
-
-# Build TypeScript
-RUN npm run build
-
-# Install pw-sync CLI (mount it from host orchestrator or copy during build)
-RUN echo '#!/usr/bin/env node\nconsole.log("pw-sync placeholder")' > /usr/local/bin/pw-sync && chmod +x /usr/local/bin/pw-sync
 
 # Create workspace directories
 RUN mkdir -p /workspace/group /workspace/global /workspace/extra /workspace/ipc/messages /workspace/ipc/tasks /workspace/ipc/input
@@ -74,5 +48,6 @@ ENV PATH=$PATH:/root/.npm-global/bin
 
 WORKDIR /workspace
 
-# Entry point reads JSON from stdin, outputs JSON to stdout
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+# Mandatory V8.4 Entrypoint (mounted from host or provided as placeholder)
+# Host orchestrator/bin/factory sync will mount scripts/agent-init.sh to /usr/local/bin/agent-init.sh
+ENTRYPOINT ["/usr/local/bin/agent-init.sh"]

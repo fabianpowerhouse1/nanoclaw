@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'vitest';
 import request from 'supertest';
-import app from '../src/app.js';
+import { createApp } from '../src/app.js';
+const app = createApp({ getActiveContainers: () => [] });
 describe('HealthCheck System - SDD Compliance', () => {
     test('GET /health should return 200 OK', async () => {
         const start = Date.now();

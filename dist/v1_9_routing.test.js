@@ -19,7 +19,6 @@ vi.mock('./container-runner.js', () => ({
     runContainerAgent: vi.fn(async () => 'success'),
     writeTasksSnapshot: vi.fn(),
     writeGroupsSnapshot: vi.fn(),
-    resolvePersonaPath: vi.fn(() => '/fake/path'),
 }));
 // Mock index-level dependencies
 vi.mock('./db.js', () => ({
